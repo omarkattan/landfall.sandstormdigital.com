@@ -49,6 +49,9 @@
     font-family: var(--mono); font-size: 11px; color: var(--muted);
     word-break: break-all;
   }
+  .who { font-family: var(--mono); font-size: 11px; color: var(--sand); }
+  .appfoot { border-top: 1px solid var(--line); margin-top: 40px; padding: 22px 0 8px; }
+  .appfoot p { margin: 0; font-family: var(--mono); font-size: 11px; color: var(--muted); }
 
   .pills { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0 26px; }
   .pill {
@@ -207,11 +210,6 @@
   .empty { color: var(--muted); padding: 16px 0; }
   .err { color: var(--err); font-family: var(--mono); font-size: 12px; }
 
-  #gate { max-width: 320px; margin: 16vh auto; }
-  #gate h1 {
-    font-size: 15px; letter-spacing: 0.16em; text-transform: uppercase;
-    margin: 0 0 16px; font-weight: 600;
-  }
   input[type=text], input[type=password], input[type=date], textarea {
     width: 100%; background: var(--panel); border: 1px solid var(--line);
     color: var(--text); border-radius: 3px; padding: 8px 10px;
@@ -240,17 +238,11 @@
 </head>
 <body>
 
-<div id="gate" hidden>
-  <h1>Land<span>fall</span></h1>
-  <input type="password" id="key" placeholder="Admin key" autocomplete="current-password">
-  <button class="primary" id="signin" style="width:100%">Sign in</button>
-  <p class="err" id="gateErr"></p>
-</div>
-
 <div class="wrap" id="app" hidden>
   <header class="top">
     <h1>Land<span>fall</span></h1>
     <span class="sa" id="sa"></span>
+    <span class="who" id="who"></span>
     <button id="signout" style="margin-left:auto">Sign out</button>
   </header>
 
@@ -269,6 +261,11 @@
       </span>
     </h2>
     <div id="findings"><p class="empty">Loading.</p></div>
+  </section>
+
+  <section id="peopleSection" hidden>
+    <h2>People</h2>
+    <div id="people"></div>
   </section>
 
   <section>
@@ -339,6 +336,11 @@
     </form>
     <div id="upd"></div>
   </section>
+
+  <footer class="appfoot">
+    <p>Copyright 2026 Landfall - Another
+      <a href="https://sandstormdigital.com" rel="noopener">Sandstorm Digital</a> Production</p>
+  </footer>
 </div>
 
 <div class="toast" id="toast"></div>
@@ -528,6 +530,69 @@ async function loadUpdates() {
       </tr>`;
     }).join('')}</tbody></table>`;
 }
+
+// -------------------------------------------------------------- people
+
+async function loadPeople() {
+  if ($('peopleSection').hidden) return;
+  const d = await api('/api/people');
+
+  const pending = d.users.filter((u) => u.status === 'pending');
+  let html = '';
+
+  if (pending.length) {
+    html += `<p class="sub">Waiting for approval</p><table><tbody>${pending.map((u) => `
+      <tr>
+        <td class="mono">${esc(u.email)}</td>
+        <td>${esc(u.name || '')}</td>
+        <td class="mono hide-sm">${shortDate(u.created_at)}</td>
+        <td><span class="btnrow">
+          <button data-let="${u.id}">Let in</button>
+          <button data-block="${u.id}">Block</button>
+        </span></td>
+      </tr>`).join('')}</tbody></table>`;
+  }
+
+  const active = d.users.filter((u) => u.status === 'active');
+  if (active.length) {
+    html += `<p class="sub">Accounts</p><table><tbody>${active.map((u) => `
+      <tr>
+        <td class="mono">${esc(u.email)}</td>
+        <td>${esc(u.name || '')}</td>
+        <td class="hide-sm"><span class="tag">${esc(u.role)}</span></td>
+        <td class="mono hide-sm">${u.last_login_at ? shortDate(u.last_login_at) : 'never'}</td>
+        <td>${u.role === 'admin' ? '' : `<button data-block="${u.id}">Block</button>`}</td>
+      </tr>`).join('')}</tbody></table>`;
+  }
+
+  if (d.waitlist.length) {
+    html += `<p class="sub">Requested access (${d.waitlist.length})</p><table><tbody>${d.waitlist.slice(0, 20).map((w) => `
+      <tr>
+        <td class="mono">${esc(w.email)}</td>
+        <td>${esc(w.name || '')}</td>
+        <td class="hide-sm">${esc(w.company || '')}</td>
+        <td class="mono hide-sm">${esc(w.website || '')}</td>
+        <td class="mono hide-sm">${shortDate(w.created_at)}</td>
+      </tr>`).join('')}</tbody></table>`;
+  }
+
+  $('people').innerHTML = html || '<p class="empty">Nobody has signed up or requested access yet.</p>';
+}
+
+$('people').addEventListener('click', (ev) => {
+  const t = ev.target.closest('button');
+  if (!t) return;
+  const id = t.dataset.let || t.dataset.block;
+  if (!id) return;
+  const status = t.dataset.let ? 'active' : 'blocked';
+  busy(t, '...', async () => {
+    const r = await api(`/api/people/${id}/status`, {
+      method: 'POST', body: JSON.stringify({ status })
+    });
+    toast(`${r.email} is now ${r.status}`);
+    await loadPeople();
+  });
+});
 
 // -------------------------------------------------------- opportunities
 
@@ -849,6 +914,7 @@ async function loadAll() {
   await Promise.all([loadStatus(), loadProps(), loadJobs(), loadUpdates()]);
   await Promise.all([
     loadOpportunities().catch(() => {}),
+    loadPeople().catch(() => {}),
     loadUpdateList().catch(() => {}),
     loadSegments().catch(() => {})
   ]);
@@ -927,16 +993,6 @@ $('saveManual').addEventListener('click', (e) => busy(e.target, 'Saving', async 
   await loadAll();
 }));
 
-$('signin').addEventListener('click', (e) => busy(e.target, 'Checking', async () => {
-  try {
-    await api('/api/login', { method: 'POST', body: JSON.stringify({ key: $('key').value }) });
-    location.reload();
-  } catch (err) {
-    $('gateErr').textContent = err.message;
-  }
-}));
-
-$('key').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('signin').click(); });
 
 $('signout').addEventListener('click', async () => {
   await api('/api/logout', { method: 'POST' });
@@ -946,11 +1002,14 @@ $('signout').addEventListener('click', async () => {
 (async function boot() {
   const s = await api('/api/session');
   if (!s.signedIn) {
-    $('gate').hidden = false;
-    $('key').focus();
+    // The server serves the landing page to signed-out visitors, so reaching
+    // here means the session expired mid-visit.
+    location.href = '/';
     return;
   }
   $('app').hidden = false;
+  $('who').textContent = s.email && s.email !== 'admin' ? s.email : '';
+  if (s.owner) $('peopleSection').hidden = false;
   try {
     await loadAll();
   } catch (err) {

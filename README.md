@@ -21,21 +21,21 @@ Impact detection comes in Round 3.
 
 1. Create a project at console.cloud.google.com.
 2. Enable the **Google Search Console API** under APIs and Services.
-3. Go to IAM and Admin, Service Accounts, Create service account. Name it
-   `landfall`. No roles needed.
-4. Open the service account, Keys, Add key, Create new key, JSON. Download it.
-5. Copy the `client_email` value. It looks like
-   `landfall@yourproject.iam.gserviceaccount.com`.
+3. IAM and Admin, Service Accounts, Create service account. Name it `landfall`.
+   No roles needed, skip both optional steps.
+4. Open it, Keys, Add key, Create new key, JSON. Download it.
 
-There is no OAuth consent screen and no verification. The service account is
-just another user as far as Search Console is concerned.
+There is no OAuth client, no consent screen, and no verification. The service
+account is just another user as far as Search Console is concerned. Ignore any
+prompt to create an OAuth client.
 
 ## 2. Grant access to each client property
 
-In Search Console, for every property:
+Copy `client_email` from the downloaded JSON. It looks like
+`landfall@yourproject.iam.gserviceaccount.com`.
 
-Settings, Users and permissions, Add user, paste the service account email,
-permission **Full** or **Restricted** (either works, Restricted is enough).
+In Search Console, for every property: Settings, Users and permissions, Add
+user, paste that email, permission **Restricted** is enough.
 
 Both domain properties (`sc-domain:example.com`) and URL prefix properties
 (`https://example.com/`) are supported.
@@ -55,17 +55,29 @@ Environment variables:
 | `DATABASE_URL` | The **Internal Database URL** from your Render Postgres |
 | `ADMIN_KEY` | A long random string. This is your login |
 | `CRON_KEY` | A different long random string for the cron endpoints |
-| `GOOGLE_SA_JSON` | The entire contents of the downloaded JSON key file |
 | `TOP_N` | Optional, default `500`. Top queries and pages stored per day |
 | `BACKFILL_MONTHS` | Optional, default `16`. Search Console holds no more |
 | `TICK_BUDGET_MS` | Optional, default `45000` |
 
-`GOOGLE_SA_JSON` must be the whole file including the outer braces. Escaped
-newlines in `private_key` are repaired automatically.
+Names must match exactly. `ADMIN-KEY` or `admin_key` will not be read, though
+the setup page will spot a near miss and tell you.
 
-**If something is misconfigured the app still starts.** Open the service URL
-and the page names the exact problem. The same text appears in the Render logs.
-Fix it under Environment, then redeploy.
+### Google credentials, three ways
+
+Pick whichever works with your host. They are checked in this order.
+
+**A. Secret file, most reliable.** Render dashboard, web service, Environment,
+**Secret Files**. Upload the downloaded JSON as `service-account.json`. Nothing
+else needed. Any single `.json` in `/etc/secrets` is picked up automatically,
+or point `GOOGLE_SA_JSON_PATH` at a specific path.
+
+**B. One environment variable.** Set `GOOGLE_SA_JSON` to the whole file. If the
+dashboard mangles the line breaks, minify the JSON to a single line first and
+paste that. Escaped `\n` sequences are repaired automatically.
+
+**C. Two environment variables.** Set `GOOGLE_CLIENT_EMAIL` and
+`GOOGLE_PRIVATE_KEY` separately. Surrounding quotes and escaped newlines in the
+key are handled.
 
 ## 4. Cron
 
@@ -121,22 +133,30 @@ window is safe and picks up Google's late revisions.
 
 ## Troubleshooting
 
-**The page says environment variables are not set.** Add them under Environment
-on the web service and redeploy. The page lists exactly which ones.
+The app never crashes on a configuration problem. It starts, and the service URL
+shows exactly what is wrong. The same text appears in the Render logs.
 
-**The page says it could not reach Postgres.** Use the Internal Database URL,
-not the external one, and confirm the database and web service are in the same
-region.
+**"These environment variables are not set."** Add them under Environment. If a
+variable exists under a slightly different name, the page says so.
 
-**Jobs land in error.** The message is visible in the admin console next to the
-job. **Retry failed** requeues them all.
+**"No Google service account credentials found."** None of the three methods
+above found anything. The secret file route is the most reliable.
 
-**Update sync fails.** The Search Status Dashboard feed may have changed shape.
-**Add by hand** still works and nothing else is affected.
+**"is not valid JSON."** The value was truncated, usually by a dashboard that
+does not accept line breaks. Minify the file to one line, or use a secret file.
+
+**"Could not sign with the service account private key."** The key arrived
+without its line breaks and could not be repaired. Use a secret file.
+
+**"Could not reach Postgres."** Use the Internal Database URL, not the external
+one, and confirm the database and web service are in the same region.
+
+**Jobs land in error.** The message shows in the admin console next to the job.
+**Retry failed** requeues them all.
 
 ## Notes
 
 - Search Console finalises data about 3 days late. `DATA_LAG_DAYS` controls how
-  far back "today" is treated as being. Requests never go past that.
+  far back "today" is treated as being.
 - Jobs retry twice, then land in `error`.
 - Node is pinned to 22.x. Render otherwise picks the newest release available.

@@ -5,9 +5,15 @@ const express = require('express');
 const cookieParser = require('cookie-parser');
 
 const PORT = process.env.PORT || 3000;
-const ADMIN_KEY = process.env.ADMIN_KEY || '';
-const CRON_KEY = process.env.CRON_KEY || '';
 const TICK_BUDGET_MS = parseInt(process.env.TICK_BUDGET_MS || '45000', 10);
+
+function envValue(name) {
+  const v = process.env[name];
+  return typeof v === 'string' && v.trim().length > 0 ? v.trim() : null;
+}
+
+const ADMIN_KEY = envValue('ADMIN_KEY');
+const CRON_KEY = envValue('CRON_KEY');
 
 /**
  * Holds the reason the app is not usable, if any. When this is set the server
@@ -20,12 +26,29 @@ let startupProblem = null;
 const REQUIRED = [
   ['DATABASE_URL', 'the Internal Database URL from your Render Postgres instance'],
   ['ADMIN_KEY', 'a long random string, used to sign in'],
-  ['CRON_KEY', 'a different long random string, used by the cron jobs'],
-  ['GOOGLE_SA_JSON', 'the full contents of the service account key file, braces included']
+  ['CRON_KEY', 'a different long random string, used by the cron jobs']
 ];
 
-function missingEnv() {
-  return REQUIRED.filter(([name]) => !process.env[name]);
+/**
+ * Catches the most common cause of a "not set" variable: it is set, but under a
+ * slightly different name. Looks for anything that matches once spaces, dashes,
+ * underscores and case are ignored.
+ */
+function nearMisses(name) {
+  const flatten = (s) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const target = flatten(name);
+  return Object.keys(process.env).filter((k) => k !== name && flatten(k) === target);
+}
+
+function describeMissing(name, hint) {
+  const near = nearMisses(name);
+  let line = `  ${name}\n    ${hint}`;
+  if (near.length) {
+    line += `\n    Found a variable named "${near[0]}". Rename it to exactly ${name}.`;
+  } else if (name in process.env) {
+    line += `\n    This variable exists but its value is empty.`;
+  }
+  return line;
 }
 
 const app = express();
@@ -42,8 +65,6 @@ function wrap(fn) {
   };
 }
 
-// Health always answers, so Render sees the service as live and the logs stay
-// readable while configuration is being fixed.
 app.get('/healthz', (req, res) => {
   res.json({ ok: !startupProblem, problem: startupProblem });
 });
@@ -52,7 +73,6 @@ app.get('/api/setup', (req, res) => {
   res.json({ ready: !startupProblem, problem: startupProblem });
 });
 
-// Every other API route waits until startup succeeded.
 app.use('/api', (req, res, next) => {
   if (req.path === '/setup') return next();
   if (startupProblem) {
@@ -62,7 +82,7 @@ app.use('/api', (req, res, next) => {
 });
 
 const db = require('./db');
-const { listSites, serviceAccountEmail } = require('./google');
+const google = require('./google');
 const ingest = require('./ingest');
 const updates = require('./updates');
 
@@ -116,7 +136,7 @@ app.get('/api/status', requireAdmin, wrap(async (req, res) => {
   jobs.rows.forEach((r) => { jobCounts[r.status] = r.n; });
 
   res.json({
-    serviceAccount: serviceAccountEmail(),
+    serviceAccount: google.serviceAccountEmail(),
     properties: props.rows[0],
     jobs: jobCounts,
     metrics: rows.rows[0],
@@ -141,7 +161,7 @@ app.get('/api/properties', requireAdmin, wrap(async (req, res) => {
 }));
 
 app.post('/api/properties/sync', requireAdmin, wrap(async (req, res) => {
-  const sites = await listSites();
+  const sites = await google.listSites();
   let added = 0;
 
   for (const s of sites) {
@@ -250,7 +270,7 @@ function setupPage(problem) {
 <title>Landfall setup</title><style>
 body{margin:0;background:#0e1218;color:#dde3ec;font-family:system-ui,-apple-system,sans-serif;
 display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px}
-main{max-width:560px}
+main{max-width:600px}
 h1{font-size:15px;letter-spacing:.16em;text-transform:uppercase;margin:0 0 18px;font-weight:600}
 h1 span{color:#d9a441}
 pre{background:#161c26;border:1px solid #252d3a;border-left:3px solid #e0655c;
@@ -283,11 +303,21 @@ const server = app.listen(PORT, () => {
 });
 
 async function start() {
-  const missing = missingEnv();
+  const problems = [];
+
+  const missing = REQUIRED.filter(([name]) => !envValue(name));
   if (missing.length) {
-    startupProblem =
+    problems.push(
       'These environment variables are not set:\n\n' +
-      missing.map(([name, hint]) => `  ${name}\n    ${hint}`).join('\n\n');
+      missing.map(([name, hint]) => describeMissing(name, hint)).join('\n\n')
+    );
+  }
+
+  const credProblem = google.credentialsProblem();
+  if (credProblem) problems.push(credProblem);
+
+  if (problems.length) {
+    startupProblem = problems.join('\n\n');
     console.error('[server] not ready\n' + startupProblem);
     return;
   }
@@ -295,7 +325,7 @@ async function start() {
   try {
     await db.init();
     startupProblem = null;
-    console.log('[server] ready');
+    console.log(`[server] ready, signing as ${google.serviceAccountEmail()}`);
   } catch (err) {
     startupProblem = err && err.message ? err.message : String(err);
     console.error('[server] not ready: ' + startupProblem);

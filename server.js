@@ -10,7 +10,7 @@ const TICK_BUDGET_MS = parseInt(process.env.TICK_BUDGET_MS || '45000', 10);
 
 // Bumped on every delivered change, so a stale file on the server is obvious
 // from the logs and from /api/setup rather than guessed at.
-const BUILD = 'r4-0';
+const BUILD = 'r4-1';
 
 function envValue(name) {
   const v = process.env[name];
@@ -156,6 +156,7 @@ const baseline = require('./baseline');
 const impact = require('./impact');
 const insights = require('./insights');
 const auth = require('./auth');
+const mailer = require('./mailer');
 
 /**
  * Two ways in. The admin key is the bootstrap credential and always works.
@@ -231,6 +232,10 @@ app.post('/api/auth/register', wrap(async (req, res) => {
     await auth.touchLogin(user.id);
   }
   res.json({ status: user.status });
+
+  if (user.status === 'pending') {
+    mailer.notifyNewAccount(user).catch((err) => console.error('[mail]', err.message));
+  }
 }));
 
 app.post('/api/auth/login', wrap(async (req, res) => {
@@ -263,7 +268,11 @@ app.post('/api/auth/google', wrap(async (req, res) => {
     await db.query('update users set google_sub = $2 where id = $1', [user.id, profile.sub]);
   }
 
-  if (user.status !== 'active') return res.json({ status: user.status });
+  if (user.status !== 'active') {
+    res.json({ status: user.status });
+    mailer.notifyNewAccount(user).catch((err) => console.error('[mail]', err.message));
+    return;
+  }
 
   res.cookie('lf_sess', auth.issueSession(user.id), COOKIE);
   await auth.touchLogin(user.id);
@@ -293,6 +302,15 @@ app.post('/api/waitlist', wrap(async (req, res) => {
   }
   const r = await auth.addToWaitlist(body);
   res.json({ ok: true, created: r.created });
+
+  // After the response, so a slow mail provider never delays the form.
+  if (r.created) {
+    mailer.notifyAccessRequest({
+      email: auth.normaliseEmail(body.email),
+      name: body.name, company: body.company,
+      website: body.website, note: body.note
+    }).catch((err) => console.error('[mail]', err.message));
+  }
 }));
 
 // ------------------------------------------------------------- people
@@ -304,7 +322,27 @@ app.get('/api/people', requireAdmin, requireOwner, wrap(async (req, res) => {
     db.query(`select id, email, name, company, website, note, created_at
                 from waitlist order by created_at desc limit 100`)
   ]);
-  res.json({ users: users.rows, waitlist: list.rows });
+  res.json({
+    users: users.rows,
+    waitlist: list.rows,
+    mail: {
+      ...mailer.status(),
+      lastSent: await mailer.lastSent(),
+      lastError: (await mailer.lastError()) || null
+    }
+  });
+}));
+
+app.post('/api/mail/test', requireAdmin, requireOwner, wrap(async (req, res) => {
+  const state = mailer.status();
+  if (!state.configured) {
+    return res.status(400).json({
+      error: `Email is not configured. Add ${state.missing.join(', ')} under Environment.`
+    });
+  }
+  const to = ((req.body && req.body.to) || '').trim() || null;
+  await mailer.sendTest(to);
+  res.json({ ok: true, to: to || state.to });
 }));
 
 app.post('/api/people/:id/status', requireAdmin, requireOwner, wrap(async (req, res) => {
@@ -318,6 +356,10 @@ app.post('/api/people/:id/status', requireAdmin, requireOwner, wrap(async (req, 
   );
   if (!r.rows[0]) return res.status(404).json({ error: 'No such person.' });
   res.json(r.rows[0]);
+
+  if (status === 'active') {
+    mailer.notifyApproved(r.rows[0]).catch((err) => console.error('[mail]', err.message));
+  }
 }));
 
 app.get('/api/status', requireAdmin, wrap(async (req, res) => {

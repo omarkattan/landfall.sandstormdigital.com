@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Landfall</title>
+<style>
+  :root {
+    --bg: #0e1218;
+    --panel: #161c26;
+    --panel-2: #1b2230;
+    --line: #252d3a;
+    --text: #dde3ec;
+    --muted: #7b8698;
+    --sand: #d9a441;
+    --ok: #4ec9b0;
+    --warn: #e0a458;
+    --err: #e0655c;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+  a { color: var(--sand); }
+
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 28px 20px 80px; }
+
+  header.top {
+    display: flex; align-items: baseline; gap: 14px;
+    flex-wrap: wrap; margin-bottom: 6px;
+  }
+  header.top h1 {
+    font-size: 17px; margin: 0; font-weight: 600;
+    letter-spacing: 0.14em; text-transform: uppercase;
+  }
+  header.top h1 span { color: var(--sand); }
+  .sa {
+    font-family: var(--mono); font-size: 11px; color: var(--muted);
+    word-break: break-all;
+  }
+
+  .pills { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0 26px; }
+  .pill {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 3px; padding: 8px 12px; min-width: 108px;
+  }
+  .pill b { display: block; font-family: var(--mono); font-size: 17px; font-weight: 600; }
+  .pill i {
+    font-style: normal; font-size: 10px; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.1em;
+  }
+
+  section { margin-bottom: 34px; }
+  section > h2 {
+    font-size: 11px; letter-spacing: 0.16em; text-transform: uppercase;
+    color: var(--muted); margin: 0 0 10px; font-weight: 600;
+    border-bottom: 1px solid var(--line); padding-bottom: 8px;
+    display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  }
+
+  button {
+    font-family: var(--sans); font-size: 12px; cursor: pointer;
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 3px; padding: 6px 11px;
+  }
+  button:hover { border-color: var(--sand); }
+  button:focus-visible { outline: 2px solid var(--sand); outline-offset: 2px; }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  button.primary { background: var(--sand); color: #1a1206; border-color: var(--sand); font-weight: 600; }
+  .btnrow { display: flex; gap: 7px; flex-wrap: wrap; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th {
+    text-align: left; font-size: 10px; text-transform: uppercase;
+    letter-spacing: 0.1em; color: var(--muted); font-weight: 600;
+    padding: 7px 9px; border-bottom: 1px solid var(--line);
+  }
+  td { padding: 9px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  tr.off td { opacity: 0.45; }
+  td.mono, .mono { font-family: var(--mono); font-size: 12px; }
+  td.num { text-align: right; font-family: var(--mono); }
+
+  .tag {
+    font-family: var(--mono); font-size: 10px; padding: 2px 6px;
+    border-radius: 2px; border: 1px solid var(--line); color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.06em;
+  }
+  .tag.core { color: var(--sand); border-color: #4a3a1c; }
+  .tag.spam { color: var(--err); border-color: #4a2622; }
+  .tag.on { color: var(--ok); border-color: #1f4740; }
+
+  /* Signature: rollout spans on a shared 18-month axis */
+  .track {
+    position: relative; height: 8px; background: var(--panel-2);
+    border-radius: 2px; overflow: hidden; min-width: 120px;
+  }
+  .span {
+    position: absolute; top: 0; bottom: 0;
+    background: var(--sand); opacity: 0.85; border-radius: 2px; min-width: 3px;
+  }
+  .span.spam { background: var(--err); }
+  .span.open { background: repeating-linear-gradient(90deg, var(--warn) 0 4px, transparent 4px 8px); }
+
+  .empty { color: var(--muted); padding: 16px 0; }
+  .err { color: var(--err); font-family: var(--mono); font-size: 12px; }
+
+  #gate { max-width: 320px; margin: 16vh auto; }
+  #gate h1 {
+    font-size: 15px; letter-spacing: 0.16em; text-transform: uppercase;
+    margin: 0 0 16px; font-weight: 600;
+  }
+  input[type=text], input[type=password], input[type=date], textarea {
+    width: 100%; background: var(--panel); border: 1px solid var(--line);
+    color: var(--text); border-radius: 3px; padding: 8px 10px;
+    font-family: var(--mono); font-size: 13px; margin-bottom: 9px;
+  }
+  input:focus, textarea:focus { outline: none; border-color: var(--sand); }
+  form.manual { display: none; margin-top: 14px; padding: 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 3px; }
+  form.manual.open { display: block; }
+  form.manual label { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin-bottom: 3px; }
+
+  .toast {
+    position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);
+    background: var(--panel-2); border: 1px solid var(--sand);
+    padding: 9px 16px; border-radius: 3px; font-family: var(--mono);
+    font-size: 12px; opacity: 0; pointer-events: none; transition: opacity .18s;
+    max-width: 90vw;
+  }
+  .toast.show { opacity: 1; }
+
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+  @media (max-width: 640px) {
+    .hide-sm { display: none; }
+    .wrap { padding: 18px 13px 60px; }
+  }
+</style>
+</head>
+<body>
+
+<div id="gate" hidden>
+  <h1>Land<span>fall</span></h1>
+  <input type="password" id="key" placeholder="Admin key" autocomplete="current-password">
+  <button class="primary" id="signin" style="width:100%">Sign in</button>
+  <p class="err" id="gateErr"></p>
+</div>
+
+<div class="wrap" id="app" hidden>
+  <header class="top">
+    <h1>Land<span>fall</span></h1>
+    <span class="sa" id="sa"></span>
+    <button id="signout" style="margin-left:auto">Sign out</button>
+  </header>
+
+  <div class="pills" id="pills"></div>
+
+  <section>
+    <h2>
+      Properties
+      <span class="btnrow">
+        <button id="syncProps">Find properties</button>
+        <button id="refreshAll">Queue refresh</button>
+      </span>
+    </h2>
+    <div id="props"></div>
+  </section>
+
+  <section>
+    <h2>
+      Queue
+      <span class="btnrow">
+        <button id="retryJobs">Retry failed</button>
+        <button id="runTick">Run a batch now</button>
+      </span>
+    </h2>
+    <div id="jobs"></div>
+  </section>
+
+  <section>
+    <h2>
+      Google ranking updates
+      <span class="btnrow">
+        <button id="syncUpd">Sync from Google</button>
+        <button id="toggleManual">Add by hand</button>
+      </span>
+    </h2>
+    <form class="manual" id="manualForm">
+      <label for="mName">Name</label>
+      <input type="text" id="mName" placeholder="August 2026 core update">
+      <label for="mBegan">Rollout start</label>
+      <input type="date" id="mBegan">
+      <label for="mEnded">Rollout end (optional)</label>
+      <input type="date" id="mEnded">
+      <label for="mUrl">Source link (optional)</label>
+      <input type="text" id="mUrl" placeholder="https://status.search.google.com/...">
+      <button class="primary" id="saveManual" type="button">Save update</button>
+    </form>
+    <div id="upd"></div>
+  </section>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let toastTimer;
+
+function toast(msg) {
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 3200);
+}
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    headers: { 'Content-Type': 'application/json' },
+    ...opts
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+  return data;
+}
+
+function busy(btn, label, fn) {
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = label;
+  return Promise.resolve(fn())
+    .catch((e) => toast(e.message))
+    .finally(() => { btn.disabled = false; btn.textContent = original; });
+}
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"]/g, (c) =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
+function shortDate(v) {
+  if (!v) return '';
+  return new Date(v).toISOString().slice(0, 10);
+}
+
+async function loadStatus() {
+  const s = await api('/api/status');
+  $('sa').textContent = s.serviceAccount || 'No service account configured';
+
+  const j = s.jobs || {};
+  const m = s.metrics || {};
+  const cells = [
+    ['Active properties', `${s.properties.active}/${s.properties.total}`],
+    ['Rows stored', Number(m.n || 0).toLocaleString()],
+    ['Coverage', m.first_date ? `${shortDate(m.first_date)} to ${shortDate(m.last_date)}` : 'none yet'],
+    ['Queued', j.queued || 0],
+    ['Failed', j.error || 0],
+    ['Updates', s.updates || 0]
+  ];
+  $('pills').innerHTML = cells.map(([label, val]) =>
+    `<div class="pill"><b>${esc(val)}</b><i>${esc(label)}</i></div>`).join('');
+
+  if (s.updatesLastError) toast(`Update sync issue: ${s.updatesLastError}`);
+}
+
+async function loadProps() {
+  const rows = await api('/api/properties');
+  if (!rows.length) {
+    $('props').innerHTML = '<p class="empty">No properties yet. Choose "Find properties" to pull everything the service account can read.</p>';
+    return;
+  }
+  $('props').innerHTML = `<table>
+    <thead><tr>
+      <th>Property</th><th class="hide-sm">Type</th><th class="hide-sm">Latest data</th>
+      <th class="num">Queued</th><th class="num hide-sm">Failed</th><th></th>
+    </tr></thead>
+    <tbody>${rows.map((p) => `
+      <tr class="${p.active ? '' : 'off'}">
+        <td class="mono">${esc(p.label || p.site_url)}</td>
+        <td class="hide-sm"><span class="tag">${p.property_type === 'domain' ? 'domain' : 'prefix'}</span></td>
+        <td class="mono hide-sm">${p.last_date ? shortDate(p.last_date) : '-'}</td>
+        <td class="num">${p.queued}</td>
+        <td class="num hide-sm">${p.errored ? `<span class="err">${p.errored}</span>` : '0'}</td>
+        <td><span class="btnrow">
+          <button data-toggle="${p.id}">${p.active ? 'Pause' : 'Activate'}</button>
+          <button data-backfill="${p.id}">Backfill</button>
+        </span></td>
+      </tr>`).join('')}</tbody></table>`;
+}
+
+async function loadJobs() {
+  const rows = await api('/api/jobs');
+  if (!rows.length) {
+    $('jobs').innerHTML = '<p class="empty">Nothing running and nothing failed.</p>';
+    return;
+  }
+  $('jobs').innerHTML = `<table>
+    <thead><tr><th>Property</th><th>Slice</th><th class="hide-sm">Window</th><th>State</th><th>Detail</th></tr></thead>
+    <tbody>${rows.map((j) => `
+      <tr>
+        <td class="mono">${esc(j.site_url)}</td>
+        <td class="mono">${esc(j.slice)}</td>
+        <td class="mono hide-sm">${shortDate(j.start_date)} to ${shortDate(j.end_date)}</td>
+        <td><span class="tag ${j.status === 'error' ? 'spam' : 'on'}">${esc(j.status)}</span></td>
+        <td class="err">${esc(j.error || '')}</td>
+      </tr>`).join('')}</tbody></table>`;
+}
+
+async function loadUpdates() {
+  const rows = await api('/api/updates');
+  if (!rows.length) {
+    $('upd').innerHTML = '<p class="empty">No updates stored. Choose "Sync from Google" to pull the ranking incident history.</p>';
+    return;
+  }
+
+  const now = Date.now();
+  const axisStart = now - 1000 * 60 * 60 * 24 * 548; // 18 months
+  const axisSpan = now - axisStart;
+
+  $('upd').innerHTML = `<table>
+    <thead><tr><th>Update</th><th class="hide-sm">Type</th><th>Rollout</th><th class="hide-sm" style="width:34%">Timeline</th></tr></thead>
+    <tbody>${rows.map((u) => {
+      const b = u.began_at ? new Date(u.began_at).getTime() : null;
+      const e = u.ended_at ? new Date(u.ended_at).getTime() : null;
+      let bar = '';
+      if (b && b > axisStart) {
+        const left = ((b - axisStart) / axisSpan) * 100;
+        const right = (((e || now) - axisStart) / axisSpan) * 100;
+        const cls = (u.update_type === 'spam' ? ' spam' : '') + (e ? '' : ' open');
+        bar = `<div class="span${cls}" style="left:${left.toFixed(2)}%;width:${Math.max(right - left, 0.4).toFixed(2)}%"></div>`;
+      }
+      const days = b ? Math.round(((e || now) - b) / 86400000) : null;
+      return `<tr>
+        <td>${u.url ? `<a href="${esc(u.url)}" target="_blank" rel="noopener">${esc(u.name)}</a>` : esc(u.name)}</td>
+        <td class="hide-sm"><span class="tag ${esc(u.update_type)}">${esc(u.update_type.replace(/_/g, ' '))}</span></td>
+        <td class="mono">${shortDate(u.began_at) || '-'}${days != null ? ` &middot; ${days}d${u.ended_at ? '' : ' open'}` : ''}</td>
+        <td class="hide-sm"><div class="track">${bar}</div></td>
+      </tr>`;
+    }).join('')}</tbody></table>`;
+}
+
+async function loadAll() {
+  await Promise.all([loadStatus(), loadProps(), loadJobs(), loadUpdates()]);
+}
+
+$('props').addEventListener('click', (ev) => {
+  const t = ev.target.closest('button');
+  if (!t) return;
+  if (t.dataset.toggle) {
+    busy(t, '...', async () => {
+      await api(`/api/properties/${t.dataset.toggle}/toggle`, { method: 'POST' });
+      await loadAll();
+    });
+  }
+  if (t.dataset.backfill) {
+    if (!confirm('Queue a 16 month backfill for this property? This runs in the background.')) return;
+    busy(t, 'Queueing', async () => {
+      const r = await api(`/api/properties/${t.dataset.backfill}/backfill`, { method: 'POST' });
+      toast(`${r.queued} jobs queued`);
+      await loadAll();
+    });
+  }
+});
+
+$('syncProps').addEventListener('click', (e) => busy(e.target, 'Looking', async () => {
+  const r = await api('/api/properties/sync', { method: 'POST' });
+  toast(`${r.found} readable, ${r.added} new`);
+  await loadAll();
+}));
+
+$('refreshAll').addEventListener('click', (e) => busy(e.target, 'Queueing', async () => {
+  const r = await api('/api/refresh', { method: 'POST' });
+  toast(`${r.queued} jobs queued`);
+  await loadAll();
+}));
+
+$('retryJobs').addEventListener('click', (e) => busy(e.target, 'Retrying', async () => {
+  const r = await api('/api/jobs/retry', { method: 'POST' });
+  toast(`${r.requeued} jobs requeued`);
+  await loadAll();
+}));
+
+$('runTick').addEventListener('click', (e) => busy(e.target, 'Running', async () => {
+  const key = prompt('Cron key');
+  if (!key) return;
+  const r = await api(`/api/ingest?key=${encodeURIComponent(key)}&budget=25000`, { method: 'POST' });
+  toast(`${r.processed} done, ${r.failed} failed, ${r.remaining} left`);
+  await loadAll();
+}));
+
+$('syncUpd').addEventListener('click', (e) => busy(e.target, 'Syncing', async () => {
+  const r = await api('/api/updates/sync', { method: 'POST' });
+  toast(`${r.written} ranking updates stored`);
+  await loadAll();
+}));
+
+$('toggleManual').addEventListener('click', () => $('manualForm').classList.toggle('open'));
+
+$('saveManual').addEventListener('click', (e) => busy(e.target, 'Saving', async () => {
+  await api('/api/updates/manual', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: $('mName').value.trim(),
+      began_at: $('mBegan').value,
+      ended_at: $('mEnded').value || null,
+      url: $('mUrl').value.trim() || null
+    })
+  });
+  $('mName').value = ''; $('mBegan').value = ''; $('mEnded').value = ''; $('mUrl').value = '';
+  $('manualForm').classList.remove('open');
+  toast('Update saved');
+  await loadAll();
+}));
+
+$('signin').addEventListener('click', (e) => busy(e.target, 'Checking', async () => {
+  try {
+    await api('/api/login', { method: 'POST', body: JSON.stringify({ key: $('key').value }) });
+    location.reload();
+  } catch (err) {
+    $('gateErr').textContent = err.message;
+  }
+}));
+
+$('key').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('signin').click(); });
+
+$('signout').addEventListener('click', async () => {
+  await api('/api/logout', { method: 'POST' });
+  location.reload();
+});
+
+(async function boot() {
+  const s = await api('/api/session');
+  if (!s.signedIn) {
+    $('gate').hidden = false;
+    $('key').focus();
+    return;
+  }
+  $('app').hidden = false;
+  try {
+    await loadAll();
+  } catch (err) {
+    toast(err.message);
+  }
+  setInterval(() => loadAll().catch(() => {}), 30000);
+})();
+</script>
+</body>
+</html>

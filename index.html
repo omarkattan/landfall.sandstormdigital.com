@@ -540,6 +540,19 @@ async function loadPeople() {
   const pending = d.users.filter((u) => u.status === 'pending');
   let html = '';
 
+  // Email is easy to get wrong and silent when it is, so its state is shown
+  // rather than left to be discovered by a missing message.
+  const m = d.mail || {};
+  if (!m.configured) {
+    html += `<p class="empty">Email notifications are off. Missing:
+      <b>${esc((m.missing || []).join(', '))}</b>. Access requests are still recorded here.</p>`;
+  } else {
+    html += `<p class="chartnote">Notifications go to <b>${esc(m.to)}</b> from
+      <b>${esc(m.from)}</b>.${m.lastSent ? ` Last sent ${shortDate(m.lastSent)}.` : ''}
+      ${m.lastError ? `<span class="err"> Last error: ${esc(m.lastError)}</span>` : ''}
+      <button id="mailTest" style="margin-left:8px">Send a test</button></p>`;
+  }
+
   if (pending.length) {
     html += `<p class="sub">Waiting for approval</p><table><tbody>${pending.map((u) => `
       <tr>
@@ -582,6 +595,15 @@ async function loadPeople() {
 $('people').addEventListener('click', (ev) => {
   const t = ev.target.closest('button');
   if (!t) return;
+
+  if (t.id === 'mailTest') {
+    return busy(t, 'Sending', async () => {
+      const r = await api('/api/mail/test', { method: 'POST', body: JSON.stringify({}) });
+      toast(`Test sent to ${r.to}. Check the inbox and the spam folder.`);
+      await loadPeople();
+    });
+  }
+
   const id = t.dataset.let || t.dataset.block;
   if (!id) return;
   const status = t.dataset.let ? 'active' : 'blocked';

@@ -122,6 +122,28 @@
     font-size: 10px; text-transform: uppercase; letter-spacing: .12em;
     color: var(--muted); margin: 20px 0 6px;
   }
+
+  select {
+    font-family: var(--sans); font-size: 12px; cursor: pointer;
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 3px; padding: 6px 9px;
+  }
+  select:hover { border-color: var(--sand); }
+  select:focus-visible { outline: 2px solid var(--sand); outline-offset: 2px; }
+
+  tr.seg { cursor: pointer; }
+  tr.seg:hover td { background: var(--panel); }
+  tr.seg.sel td { background: var(--panel-2); }
+  tr.seg.sel td:first-child { box-shadow: inset 3px 0 0 var(--sand); }
+
+  .delta { font-family: var(--mono); text-align: right; }
+  .delta.down { color: var(--err); }
+  .delta.up { color: var(--ok); }
+  .delta.flat { color: var(--muted); }
+
+  #chart svg { width: 100%; height: auto; display: block; }
+  .chartnote { font-size: 12px; color: var(--muted); margin: 8px 0 0; line-height: 1.6; }
+  .chartnote b { color: var(--text); font-family: var(--mono); }
   .span {
     position: absolute; top: 0; bottom: 0;
     background: var(--sand); opacity: 0.85; border-radius: 2px; min-width: 3px;
@@ -201,6 +223,31 @@
       </span>
     </h2>
     <div id="jobs"></div>
+  </section>
+
+  <section>
+    <h2>
+      Segments
+      <span class="btnrow">
+        <select id="segMetric">
+          <option value="clicks">Clicks</option>
+          <option value="impressions">Impressions</option>
+        </select>
+        <select id="segDays">
+          <option value="28">Last 28 days</option>
+          <option value="14">Last 14 days</option>
+          <option value="56">Last 56 days</option>
+          <option value="90">Last 90 days</option>
+        </select>
+        <button id="buildSegs">Build segments</button>
+      </span>
+    </h2>
+    <div id="segs"></div>
+    <div id="chartWrap" hidden>
+      <p class="sub" id="chartTitle"></p>
+      <div id="chart"></div>
+      <p class="chartnote" id="chartNote"></p>
+    </div>
   </section>
 
   <section>
@@ -291,6 +338,12 @@ async function loadStatus() {
 
 async function loadProps() {
   const rows = await api('/api/properties');
+
+  // Segments operate on one property. With a single client that is simply the
+  // active one; a picker belongs here once there are several.
+  const active = rows.find((p) => p.active);
+  seg.propertyId = active ? active.id : null;
+
   if (!rows.length) {
     $('props').innerHTML = '<p class="empty">No properties yet. Choose "Find properties" to pull everything the service account can read.</p>';
     return;
@@ -408,8 +461,190 @@ async function loadUpdates() {
     }).join('')}</tbody></table>`;
 }
 
+// ------------------------------------------------------------- segments
+
+const seg = { propertyId: null, selected: null };
+
+function pctClass(v) {
+  if (v == null) return 'flat';
+  if (v <= -5) return 'down';
+  if (v >= 5) return 'up';
+  return 'flat';
+}
+
+function fmtPct(v) {
+  if (v == null) return '-';
+  return `${v > 0 ? '+' : ''}${v.toFixed(1)}%`;
+}
+
+async function loadSegments() {
+  if (!seg.propertyId) {
+    $('segs').innerHTML = '<p class="empty">Activate a property first.</p>';
+    return;
+  }
+
+  const metric = $('segMetric').value;
+  const days = $('segDays').value;
+  const d = await api(`/api/segments/overview?property_id=${seg.propertyId}&metric=${metric}&days=${days}`);
+
+  if (!d.rows.length) {
+    $('segs').innerHTML = `<p class="empty">No segments yet. Choose <b>Build segments</b> to
+      derive page groups from this site's own structure and split queries by brand and intent.</p>`;
+    $('chartWrap').hidden = true;
+    return;
+  }
+
+  // Biggest movers first: a segment that held steady is rarely the story.
+  const rows = [...d.rows].sort((a, b) =>
+    Math.abs(b.deltaPct == null ? 0 : b.deltaPct) - Math.abs(a.deltaPct == null ? 0 : a.deltaPct));
+
+  $('segs').innerHTML = `<table>
+    <thead><tr>
+      <th>Segment</th><th class="hide-sm">Type</th>
+      <th class="num">Actual</th><th class="num">Expected</th>
+      <th class="num">Change</th><th class="num hide-sm">Days outside range</th>
+    </tr></thead>
+    <tbody>${rows.map((r) => `
+      <tr class="seg ${seg.selected === r.id ? 'sel' : ''}" data-seg="${r.id}">
+        <td>${esc(r.name)}</td>
+        <td class="hide-sm"><span class="tag">${esc(r.kind)}</span></td>
+        <td class="num">${r.actual.toLocaleString()}</td>
+        <td class="num">${r.expected == null ? '-' : Math.round(r.expected).toLocaleString()}</td>
+        <td class="delta ${pctClass(r.deltaPct)}">${fmtPct(r.deltaPct)}</td>
+        <td class="num hide-sm">${r.daysBelow + r.daysAbove} of ${r.days}</td>
+      </tr>`).join('')}</tbody></table>
+    <p class="chartnote">Expected is what this segment normally does on these weekdays,
+      from the previous eight weeks. Select a row to see the daily detail.</p>`;
+
+  if (seg.selected && rows.some((r) => r.id === seg.selected)) {
+    await loadChart(seg.selected);
+  }
+}
+
+/**
+ * Actual against the expected range, with rollout windows shaded. Reading the
+ * line against the band is the whole point: a drop inside the band is noise,
+ * a drop below it needs explaining.
+ */
+function renderChart(d) {
+  const pts = d.points.filter((p) => p.value != null);
+  if (pts.length < 2) {
+    $('chart').innerHTML = '<p class="empty">Not enough data to chart yet.</p>';
+    return;
+  }
+
+  const W = 900, H = 260, L = 46, R = 12, T = 14, B = 26;
+  const iw = W - L - R, ih = H - T - B;
+
+  const values = [];
+  pts.forEach((p) => {
+    values.push(p.value);
+    if (p.upper != null) values.push(p.upper);
+    if (p.lower != null) values.push(p.lower);
+  });
+  const maxV = Math.max(...values, 1);
+  const minV = Math.min(...values, 0);
+  const span = (maxV - minV) || 1;
+
+  const t0 = new Date(pts[0].date).getTime();
+  const t1 = new Date(pts[pts.length - 1].date).getTime();
+  const tspan = (t1 - t0) || 1;
+
+  const x = (iso) => L + ((new Date(iso).getTime() - t0) / tspan) * iw;
+  const y = (v) => T + ih - ((v - minV) / span) * ih;
+
+  const banded = pts.filter((p) => p.upper != null);
+  let band = '';
+  if (banded.length > 1) {
+    const top = banded.map((p) => `${x(p.date).toFixed(1)},${y(p.upper).toFixed(1)}`);
+    const bottom = [...banded].reverse().map((p) => `${x(p.date).toFixed(1)},${y(p.lower).toFixed(1)}`);
+    band = `<polygon points="${top.concat(bottom).join(' ')}" fill="var(--sand)" opacity="0.13"/>`;
+  }
+
+  const expectedLine = banded.length > 1
+    ? `<polyline points="${banded.map((p) => `${x(p.date).toFixed(1)},${y(p.expected).toFixed(1)}`).join(' ')}"
+        fill="none" stroke="var(--sand)" stroke-width="1" stroke-dasharray="3 3" opacity="0.65"/>`
+    : '';
+
+  const actualLine = `<polyline points="${pts.map((p) => `${x(p.date).toFixed(1)},${y(p.value).toFixed(1)}`).join(' ')}"
+      fill="none" stroke="var(--text)" stroke-width="1.6"/>`;
+
+  const outliers = pts.filter((p) => p.status === 'below' || p.status === 'above')
+    .map((p) => `<circle cx="${x(p.date).toFixed(1)}" cy="${y(p.value).toFixed(1)}" r="2.4"
+      fill="${p.status === 'below' ? 'var(--err)' : 'var(--ok)'}"/>`).join('');
+
+  const rollouts = (d.updates || []).map((u) => {
+    const a = Math.max(x(u.began_at.slice(0, 10)), L);
+    const b = Math.min(u.ended_at ? x(u.ended_at.slice(0, 10)) : L + iw, L + iw);
+    if (b < L || a > L + iw) return '';
+    const colour = u.update_type === 'spam' ? 'var(--err)' : 'var(--sand)';
+    return `<rect x="${a.toFixed(1)}" y="${T}" width="${Math.max(b - a, 1.5).toFixed(1)}" height="${ih}"
+      fill="${colour}" opacity="0.11"/>
+      <line x1="${a.toFixed(1)}" y1="${T}" x2="${a.toFixed(1)}" y2="${T + ih}"
+      stroke="${colour}" stroke-width="1" opacity="0.55"/>`;
+  }).join('');
+
+  const gridY = [0, 0.5, 1].map((f) => {
+    const v = minV + span * f;
+    return `<line x1="${L}" y1="${y(v).toFixed(1)}" x2="${L + iw}" y2="${y(v).toFixed(1)}"
+        stroke="var(--line)" stroke-width="1"/>
+      <text x="${L - 8}" y="${(y(v) + 3.5).toFixed(1)}" text-anchor="end"
+        fill="var(--muted)" font-size="10" font-family="ui-monospace,monospace">${Math.round(v).toLocaleString()}</text>`;
+  }).join('');
+
+  $('chart').innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img"
+      aria-label="${esc(d.segment.name)} ${esc(d.metric)} against its expected range">
+    ${gridY}${rollouts}${band}${expectedLine}${actualLine}${outliers}
+    <text x="${L}" y="${H - 8}" fill="var(--muted)" font-size="10"
+      font-family="ui-monospace,monospace">${pts[0].date}</text>
+    <text x="${L + iw}" y="${H - 8}" text-anchor="end" fill="var(--muted)" font-size="10"
+      font-family="ui-monospace,monospace">${pts[pts.length - 1].date}</text>
+  </svg>`;
+}
+
+async function loadChart(segmentId) {
+  seg.selected = segmentId;
+  const metric = $('segMetric').value;
+  const d = await api(`/api/series?segment_id=${segmentId}&metric=${metric}&days=180`);
+
+  $('chartWrap').hidden = false;
+  $('chartTitle').textContent = `${d.segment.name} - daily ${d.metric} against expected range`;
+  renderChart(d);
+
+  const s = d.summary;
+  const shaded = (d.updates || []).length;
+  $('chartNote').innerHTML = s && s.expected != null
+    ? `Last 28 days: <b>${s.actual.toLocaleString()}</b> ${esc(d.metric)} against an expected
+       <b>${Math.round(s.expected).toLocaleString()}</b>
+       (<b>${fmtPct(s.deltaPct)}</b>). ${s.daysBelow} days below the range, ${s.daysAbove} above.
+       ${shaded ? `${shaded} ranking update rollout${shaded > 1 ? 's' : ''} shaded.` : ''}`
+    : 'Not enough history yet to model an expected range for this segment.';
+}
+
+$('segs').addEventListener('click', (ev) => {
+  const row = ev.target.closest('tr.seg');
+  if (!row) return;
+  document.querySelectorAll('tr.seg').forEach((r) => r.classList.remove('sel'));
+  row.classList.add('sel');
+  loadChart(parseInt(row.dataset.seg, 10)).catch((e) => toast(e.message));
+});
+
+$('segMetric').addEventListener('change', () => loadSegments().catch((e) => toast(e.message)));
+$('segDays').addEventListener('change', () => loadSegments().catch((e) => toast(e.message)));
+
+$('buildSegs').addEventListener('click', (e) => busy(e.target, 'Building', async () => {
+  if (!seg.propertyId) return toast('Activate a property first.');
+  const r = await api('/api/segments/auto', {
+    method: 'POST',
+    body: JSON.stringify({ property_id: seg.propertyId })
+  });
+  toast(`${r.created} segments built. Brand terms: ${r.brandTerms.join(', ')}`);
+  await loadSegments();
+}));
+
 async function loadAll() {
   await Promise.all([loadStatus(), loadProps(), loadJobs(), loadUpdates()]);
+  await loadSegments().catch(() => {});
 }
 
 $('props').addEventListener('click', (ev) => {

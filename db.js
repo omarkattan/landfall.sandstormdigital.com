@@ -146,6 +146,23 @@ create table if not exists meta (
   value text,
   updated_at timestamptz not null default now()
 );
+
+create table if not exists segments (
+  id serial primary key,
+  property_id integer not null references properties(id) on delete cascade,
+  kind text not null,
+  name text not null,
+  rule_type text not null,
+  pattern text,
+  sort_order integer not null default 100,
+  auto boolean not null default false,
+  created_at timestamptz not null default now(),
+  unique (property_id, kind, name)
+);
+
+create index if not exists segments_property_idx on segments (property_id, kind, sort_order);
+
+alter table properties add column if not exists brand_terms text;
 `;
 
 /**

@@ -179,6 +179,19 @@
     display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
   }
   .rec p { margin: 0; font-size: 13px; line-height: 1.65; color: var(--muted); max-width: 78ch; }
+  .rec .value {
+    font-family: var(--mono); font-size: 11px; color: var(--sand);
+    font-weight: 400; letter-spacing: 0;
+  }
+  .items { margin: 11px 0 0; border-top: 1px solid var(--line); }
+  .item {
+    display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap;
+    padding: 7px 0; border-bottom: 1px solid var(--line); font-size: 12px;
+  }
+  .item:last-child { border-bottom: 0; padding-bottom: 0; }
+  .item .k { font-family: var(--mono); color: var(--text); flex: 1 1 240px; word-break: break-word; }
+  .item .d { color: var(--muted); font-family: var(--mono); font-size: 11px; }
+  .item .v { font-family: var(--mono); color: var(--sand); margin-left: auto; white-space: nowrap; }
 
   .tag.hit { color: var(--err); border-color: #4a2622; }
   .tag.gained { color: var(--ok); border-color: #1f4740; }
@@ -242,6 +255,11 @@
   </header>
 
   <div class="pills" id="pills"></div>
+
+  <section id="oppSection">
+    <h2>What to work on</h2>
+    <div id="opps"><p class="empty">Loading.</p></div>
+  </section>
 
   <section id="findingsSection">
     <h2>
@@ -509,6 +527,49 @@ async function loadUpdates() {
         <td class="hide-sm"><div class="track">${bar}</div></td>
       </tr>`;
     }).join('')}</tbody></table>`;
+}
+
+// -------------------------------------------------------- opportunities
+
+async function loadOpportunities() {
+  if (!seg.propertyId) {
+    $('opps').innerHTML = '<p class="empty">Activate a property first.</p>';
+    return;
+  }
+
+  const d = await api(`/api/opportunities?property_id=${seg.propertyId}`);
+
+  if (d.status !== 'ok') {
+    $('opps').innerHTML = `<p class="empty">${esc(d.message || 'Nothing to analyse yet.')}</p>`;
+    return;
+  }
+
+  if (!d.actions.length) {
+    $('opps').innerHTML = `<p class="empty">Nothing stands out in the last 28 days. No queries
+      within reach of the top, no pages underperforming their position, and no significant
+      decline or growth against the previous 28 days. That is a stable site, not a broken report.</p>`;
+    return;
+  }
+
+  const html = `<p class="detail">Comparing <b>${d.window.from}</b> to <b>${d.window.to}</b>
+      against the 28 days before it${d.totals.brandedShare != null
+        ? `. Branded queries are <b>${d.totals.brandedShare.toFixed(0)}%</b> of clicks.` : '.'}</p>
+    <div class="recs">${d.actions.map((a) => `
+      <div class="rec ${esc(a.priority)}">
+        <h4>${esc(a.title)}
+          <span class="tag ${esc(a.priority)}">${esc(a.priority)}</span>
+          ${a.value ? `<span class="value">${esc(a.value)}</span>` : ''}
+        </h4>
+        <p>${esc(a.body)}</p>
+        ${a.items.length ? `<div class="items">${a.items.map((it) => `
+          <div class="item">
+            <span class="k">${esc(it.label)}</span>
+            <span class="d">${esc(it.detail)}</span>
+            <span class="v">${esc(it.value)}</span>
+          </div>`).join('')}</div>` : ''}
+      </div>`).join('')}</div>`;
+
+  $('opps').innerHTML = html;
 }
 
 // ------------------------------------------------------------- findings
@@ -787,6 +848,7 @@ $('buildSegs').addEventListener('click', (e) => busy(e.target, 'Building', async
 async function loadAll() {
   await Promise.all([loadStatus(), loadProps(), loadJobs(), loadUpdates()]);
   await Promise.all([
+    loadOpportunities().catch(() => {}),
     loadUpdateList().catch(() => {}),
     loadSegments().catch(() => {})
   ]);

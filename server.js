@@ -1,6 +1,32 @@
 'use strict';
 
 const path = require('path');
+
+/**
+ * Preflight. Every required variable is checked before anything else loads, so
+ * a misconfigured service reports all its problems at once instead of failing
+ * on whichever one happens to be touched first.
+ */
+function preflight() {
+  const missing = [];
+  if (!process.env.DATABASE_URL) missing.push('DATABASE_URL - Internal Database URL from your Render Postgres');
+  if (!process.env.ADMIN_KEY) missing.push('ADMIN_KEY - a long random string, used to sign in');
+  if (!process.env.CRON_KEY) missing.push('CRON_KEY - a different long random string, used by the cron jobs');
+  if (!process.env.GOOGLE_SA_JSON) missing.push('GOOGLE_SA_JSON - the full contents of the service account key file');
+
+  if (missing.length) {
+    console.error('');
+    console.error('Landfall cannot start. These environment variables are not set:');
+    missing.forEach((m) => console.error(`  - ${m}`));
+    console.error('');
+    console.error('Add them under Environment on the Render web service, then redeploy.');
+    console.error('');
+    process.exit(1);
+  }
+}
+
+preflight();
+
 const express = require('express');
 const cookieParser = require('cookie-parser');
 
@@ -14,17 +40,23 @@ app.set('trust proxy', 1);
 app.use(express.json({ limit: '1mb' }));
 app.use(cookieParser());
 
-const ADMIN_KEY = process.env.ADMIN_KEY || '';
-const CRON_KEY = process.env.CRON_KEY || '';
+const ADMIN_KEY = process.env.ADMIN_KEY;
+const CRON_KEY = process.env.CRON_KEY;
 const TICK_BUDGET_MS = parseInt(process.env.TICK_BUDGET_MS || '45000', 10);
 const PORT = process.env.PORT || 3000;
 
 function requireAdmin(req, res, next) {
-  if (!ADMIN_KEY) {
-    return res.status(500).json({ error: 'ADMIN_KEY is not configured on the server.' });
-  }
-  if (req.cookies && req.cookies.ar_key === ADMIN_KEY) return next();
+  if (req.cookies && req.cookies.lf_key === ADMIN_KEY) return next();
   return res.status(401).json({ error: 'Sign in to continue.' });
+}
+
+function requireCron(req, res) {
+  const key = req.query.key || req.headers['x-cron-key'];
+  if (key !== CRON_KEY) {
+    res.status(401).json({ error: 'Bad cron key.' });
+    return false;
+  }
+  return true;
 }
 
 function wrap(fn) {
@@ -40,10 +72,9 @@ app.get('/healthz', (req, res) => res.json({ ok: true }));
 
 app.post('/api/login', (req, res) => {
   const key = (req.body && req.body.key) || '';
-  if (!ADMIN_KEY) return res.status(500).json({ error: 'ADMIN_KEY is not configured on the server.' });
   if (key !== ADMIN_KEY) return res.status(401).json({ error: 'That key does not match.' });
 
-  res.cookie('ar_key', key, {
+  res.cookie('lf_key', key, {
     httpOnly: true,
     sameSite: 'lax',
     secure: process.env.NODE_ENV === 'production',
@@ -53,12 +84,12 @@ app.post('/api/login', (req, res) => {
 });
 
 app.post('/api/logout', (req, res) => {
-  res.clearCookie('ar_key');
+  res.clearCookie('lf_key');
   res.json({ ok: true });
 });
 
 app.get('/api/session', (req, res) => {
-  res.json({ signedIn: Boolean(req.cookies && req.cookies.ar_key === ADMIN_KEY) });
+  res.json({ signedIn: Boolean(req.cookies && req.cookies.lf_key === ADMIN_KEY) });
 });
 
 app.get('/api/status', requireAdmin, wrap(async (req, res) => {
@@ -177,29 +208,31 @@ app.post('/api/updates/manual', requireAdmin, wrap(async (req, res) => {
 }));
 
 /**
+ * Lets the admin console run a batch without holding the cron key, since it is
+ * already authenticated by session.
+ */
+app.post('/api/tick', requireAdmin, wrap(async (req, res) => {
+  const budget = Math.min(parseInt(req.query.budget || '25000', 10), 120000);
+  res.json(await ingest.runTick(budget));
+}));
+
+/**
  * Cron entry point. Authenticated with CRON_KEY so it can be called by
  * cron-job.org without a browser session.
  */
 app.all('/api/ingest', wrap(async (req, res) => {
-  const key = req.query.key || req.headers['x-cron-key'];
-  if (!CRON_KEY || key !== CRON_KEY) {
-    return res.status(401).json({ error: 'Bad cron key.' });
-  }
+  if (!requireCron(req, res)) return;
   const budget = Math.min(parseInt(req.query.budget || TICK_BUDGET_MS, 10), 120000);
-  const result = await ingest.runTick(budget);
-  res.json(result);
+  res.json(await ingest.runTick(budget));
 }));
 
 /**
  * Nightly queue top-up. Point a second cron at this once a day.
  */
 app.all('/api/cron/refresh', wrap(async (req, res) => {
-  const key = req.query.key || req.headers['x-cron-key'];
-  if (!CRON_KEY || key !== CRON_KEY) {
-    return res.status(401).json({ error: 'Bad cron key.' });
-  }
+  if (!requireCron(req, res)) return;
   const queued = await ingest.queueRefresh();
-  let synced = null;
+  let synced;
   try {
     synced = await updates.syncGoogleUpdates();
   } catch (err) {
@@ -216,9 +249,20 @@ app.get('/', (req, res) => {
 
 db.init()
   .then(() => {
-    app.listen(PORT, () => console.log(`[server] listening on ${PORT}`));
+    app.listen(PORT, () => console.log(`[server] Landfall listening on ${PORT}`));
   })
   .catch((err) => {
-    console.error('[server] failed to start:', err.message);
+    console.error('');
+    console.error('Landfall could not start.');
+    console.error(err && err.message ? err.message : String(err));
+    if (err && Array.isArray(err.errors)) {
+      err.errors.forEach((e) => console.error(`  - ${e.code || ''} ${e.message || e}`.trim()));
+    }
+    if (err && err.stack) console.error(err.stack);
+    console.error('');
     process.exit(1);
   });
+
+process.on('unhandledRejection', (err) => {
+  console.error('[server] unhandled rejection:', err && err.message ? err.message : err);
+});

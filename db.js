@@ -2,21 +2,80 @@
 
 const { Pool } = require('pg');
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL && process.env.DATABASE_URL.includes('localhost')
-    ? false
-    : { rejectUnauthorized: false },
-  max: 5,
-  idleTimeoutMillis: 30000
-});
+const DATABASE_URL = process.env.DATABASE_URL;
 
-pool.on('error', (err) => {
-  console.error('[db] idle client error', err.message);
-});
+/**
+ * Render internal hostnames have no dots (dpg-xxxxx-a) and take a plain
+ * connection. External hostnames are fully qualified and need TLS.
+ */
+function needsSsl(url) {
+  try {
+    const host = new URL(url).hostname;
+    if (host === 'localhost' || host === '127.0.0.1') return false;
+    return host.includes('.');
+  } catch (e) {
+    return false;
+  }
+}
+
+function configError(message) {
+  const err = new Error(message);
+  err.isConfigError = true;
+  return err;
+}
+
+function buildPool() {
+  if (!DATABASE_URL) {
+    throw configError(
+      'DATABASE_URL is not set. In Render, open your Postgres instance, copy the ' +
+      'Internal Database URL, then add it as a DATABASE_URL environment variable ' +
+      'on the web service.'
+    );
+  }
+
+  let parsed;
+  try {
+    parsed = new URL(DATABASE_URL);
+  } catch (e) {
+    throw configError(
+      'DATABASE_URL is not a valid connection string. It should look like ' +
+      'postgresql://user:password@host/dbname'
+    );
+  }
+
+  if (!/^postgres(ql)?:$/.test(parsed.protocol)) {
+    throw configError(
+      `DATABASE_URL starts with "${parsed.protocol}" but should start with postgresql://`
+    );
+  }
+
+  return new Pool({
+    connectionString: DATABASE_URL,
+    ssl: needsSsl(DATABASE_URL) ? { rejectUnauthorized: false } : false,
+    max: 5,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 15000
+  });
+}
+
+let pool = null;
+
+/**
+ * Built on first use rather than at require time, so a bad connection string
+ * is reported through init() as a readable message instead of a raw stack
+ * trace thrown while the module is still loading.
+ */
+function getPool() {
+  if (pool) return pool;
+  pool = buildPool();
+  pool.on('error', (err) => {
+    console.error('[db] idle client error:', err.message || err.code || String(err));
+  });
+  return pool;
+}
 
 function query(text, params) {
-  return pool.query(text, params);
+  return getPool().query(text, params);
 }
 
 const SCHEMA = `
@@ -116,7 +175,75 @@ async function ensurePartitions(fromDate, toDate) {
   }
 }
 
+/**
+ * Node reports a refused TCP connection as an AggregateError whose own message
+ * is empty, which hides the real cause. Unwrap it into something readable.
+ */
+function describeDbError(err) {
+  if (err && err.isConfigError) return err.message;
+
+  const parts = [];
+  const inner = err && Array.isArray(err.errors) ? err.errors : [err];
+
+  for (const e of inner) {
+    if (!e) continue;
+    const message = e.message || '';
+    const socket = e.address ? `${e.address}:${e.port}` : '';
+    const bits = [
+      e.code && !message.includes(e.code) ? e.code : null,
+      message || null,
+      socket && !message.includes(socket) ? socket : null
+    ].filter(Boolean);
+    if (bits.length) parts.push(bits.join(' '));
+  }
+
+  const detail = parts.length ? parts.join('; ') : 'no detail reported';
+  let host = 'unknown host';
+  try {
+    host = new URL(DATABASE_URL).hostname;
+  } catch (e) {
+    // leave the fallback
+  }
+
+  if (/ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT/.test(detail)) {
+    return (
+      `Could not reach Postgres at "${host}". ${detail}. ` +
+      `Check that DATABASE_URL holds your Render Postgres Internal Database URL ` +
+      `and that the database and web service sit in the same region.`
+    );
+  }
+  if (/password|authentication|role .* does not exist/i.test(detail)) {
+    return `Postgres rejected the credentials in DATABASE_URL. ${detail}`;
+  }
+  if (/self.signed|certificate|SSL/i.test(detail)) {
+    return `TLS negotiation with Postgres failed. ${detail}`;
+  }
+  return `Postgres connection failed. ${detail}`;
+}
+
+async function connectWithRetry(attempts = 5) {
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      const client = await getPool().connect();
+      client.release();
+      return;
+    } catch (err) {
+      const message = describeDbError(err);
+      // A bad connection string will never fix itself, so do not retry it.
+      if (err && err.isConfigError) throw new Error(message);
+      if (i === attempts) throw new Error(message);
+      const wait = Math.min(1000 * Math.pow(2, i - 1), 8000);
+      console.warn(`[db] attempt ${i} of ${attempts} failed: ${message}`);
+      console.warn(`[db] retrying in ${wait}ms`);
+      await new Promise((r) => setTimeout(r, wait));
+    }
+  }
+}
+
 async function init() {
+  await connectWithRetry();
+  console.log('[db] connected');
+
   await query(SCHEMA);
 
   const now = new Date();
@@ -142,4 +269,12 @@ async function setMeta(key, value) {
   );
 }
 
-module.exports = { pool, query, init, ensurePartitions, getMeta, setMeta };
+module.exports = {
+  getPool,
+  query,
+  init,
+  ensurePartitions,
+  getMeta,
+  setMeta,
+  describeDbError
+};

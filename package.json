@@ -1,11 +1,11 @@
 {
-  "name": "algo-radar",
-  "version": "0.1.0",
+  "name": "landfall",
+  "version": "0.1.1",
   "private": true,
   "description": "Maps search algorithm updates to client Search Console performance",
   "main": "server.js",
   "engines": {
-    "node": ">=20.0.0"
+    "node": "22.x"
   },
   "scripts": {
     "start": "node server.js"

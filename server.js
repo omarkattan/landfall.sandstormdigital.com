@@ -1,11 +1,16 @@
 'use strict';
 
+const fs = require('fs');
 const path = require('path');
 const express = require('express');
 const cookieParser = require('cookie-parser');
 
 const PORT = process.env.PORT || 3000;
 const TICK_BUDGET_MS = parseInt(process.env.TICK_BUDGET_MS || '45000', 10);
+
+// Bumped on every delivered change, so a stale file on the server is obvious
+// from the logs and from /api/setup rather than guessed at.
+const BUILD = 'r1-6';
 
 function envValue(name) {
   const v = process.env[name];
@@ -14,6 +19,45 @@ function envValue(name) {
 
 const ADMIN_KEY = envValue('ADMIN_KEY');
 const CRON_KEY = envValue('CRON_KEY');
+
+/**
+ * The console is served from public/index.html when that exists, and from the
+ * repo root otherwise, so a flat repo works without moving files around.
+ */
+const STATIC_DIRS = [path.join(__dirname, 'public'), __dirname, process.cwd()]
+  .map((d) => path.resolve(d))
+  .filter((d, i, all) => all.indexOf(d) === i)
+  .filter((d) => {
+    try {
+      return fs.existsSync(d) && fs.statSync(d).isDirectory();
+    } catch (e) {
+      return false;
+    }
+  });
+
+function findIndexHtml() {
+  for (const dir of STATIC_DIRS) {
+    const candidate = path.join(dir, 'index.html');
+    try {
+      if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) return candidate;
+    } catch (e) {
+      // unreadable, keep looking
+    }
+  }
+  return null;
+}
+
+function describeStaticDirs() {
+  return STATIC_DIRS.map((d) => {
+    let files;
+    try {
+      files = fs.readdirSync(d).filter((f) => f.toLowerCase().endsWith('.html'));
+    } catch (e) {
+      return `  ${d} - unreadable`;
+    }
+    return `  ${d} - ${files.length ? files.join(', ') : 'no .html files'}`;
+  }).join('\n');
+}
 
 /**
  * Holds the reason the app is not usable, if any. When this is set the server
@@ -51,6 +95,28 @@ function describeMissing(name, hint) {
   return line;
 }
 
+// Platform and toolchain variables, hidden so the list shows only what you set.
+const NOISE = /^(PATH|HOME|PWD|SHLVL|_|TERM|LANG|USER|HOSTNAME|TMPDIR|OLDPWD|SHELL|EDITOR|PAGER|COLUMNS|LINES|GOPATH|GOROOT|GOCACHE|GOMODCACHE)$|^(LC_|npm_|NODE_|YARN_|NVM_|RENDER_|BUN_|PYTHON|GEM_|RUBY|JAVA_)/;
+
+/**
+ * Names only, never values. Seeing the exact list removes the guesswork when a
+ * variable appears to be set in the dashboard but is not reaching the process.
+ */
+function visibleEnvNames() {
+  return Object.keys(process.env).filter((k) => !NOISE.test(k)).sort();
+}
+
+function envInventory() {
+  const names = visibleEnvNames();
+  if (!names.length) {
+    return 'No custom environment variables are reaching this app at all.\n' +
+      'That usually means the values were entered but not saved, or they were\n' +
+      'added to a different service.';
+  }
+  return 'Environment variables this app can currently see (names only):\n  ' +
+    names.join(', ');
+}
+
 const app = express();
 app.set('trust proxy', 1);
 app.use(express.json({ limit: '1mb' }));
@@ -66,11 +132,11 @@ function wrap(fn) {
 }
 
 app.get('/healthz', (req, res) => {
-  res.json({ ok: !startupProblem, problem: startupProblem });
+  res.json({ ok: !startupProblem, build: BUILD, problem: startupProblem });
 });
 
 app.get('/api/setup', (req, res) => {
-  res.json({ ready: !startupProblem, problem: startupProblem });
+  res.json({ ready: !startupProblem, build: BUILD, problem: startupProblem });
 });
 
 app.use('/api', (req, res, next) => {
@@ -260,36 +326,68 @@ app.all('/api/cron/refresh', wrap(async (req, res) => {
   res.json({ queued, updates: synced });
 }));
 
-app.use(express.static(path.join(__dirname, 'public'), { index: false }));
+// Serve assets from public/ when present, otherwise from the repo root.
+// The guard blocks source files, which would otherwise be reachable by URL
+// when the root itself is the static directory.
+const BLOCKED = /\.(js|json|md|lock|env|sql|ya?ml|txt)$/i;
+app.use((req, res, next) => {
+  if (req.method === 'GET' && BLOCKED.test(req.path) && !req.path.startsWith('/api')) {
+    return res.status(404).type('text').send('Not found');
+  }
+  next();
+});
+for (const dir of STATIC_DIRS) {
+  app.use(express.static(dir, { index: false, dotfiles: 'deny' }));
+}
 
-function setupPage(problem) {
-  const escaped = String(problem)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+function page(title, body) {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Landfall setup</title><style>
+<title>${title}</title><style>
 body{margin:0;background:#0e1218;color:#dde3ec;font-family:system-ui,-apple-system,sans-serif;
 display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px}
-main{max-width:600px}
+main{max-width:640px}
 h1{font-size:15px;letter-spacing:.16em;text-transform:uppercase;margin:0 0 18px;font-weight:600}
 h1 span{color:#d9a441}
 pre{background:#161c26;border:1px solid #252d3a;border-left:3px solid #e0655c;
 border-radius:3px;padding:14px 16px;white-space:pre-wrap;word-break:break-word;
 font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;line-height:1.55;margin:0 0 18px}
 p{color:#7b8698;font-size:13px;line-height:1.6;margin:0}
-</style></head><body><main>
-<h1>Landfall <span>setup</span></h1>
-<pre>${escaped}</pre>
-<p>Fix this under Environment on the Render web service, then redeploy.
-This page replaces the app until startup succeeds.</p>
-</main></body></html>`;
+</style></head><body><main>${body}</main></body></html>`;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 app.get('/', (req, res) => {
   if (startupProblem) {
-    return res.status(503).type('html').send(setupPage(startupProblem));
+    return res.status(503).type('html').send(page('Landfall setup',
+      `<h1>Landfall <span>setup</span></h1><pre>${escapeHtml(startupProblem)}</pre>
+<p>Fix this under Environment on the Render web service, then redeploy.
+This page replaces the app until startup succeeds.</p>`));
   }
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+
+  const index = findIndexHtml();
+  if (!index) {
+    return res.status(500).type('html').send(page('Landfall',
+      `<h1>Landfall</h1><pre>index.html was not found. Build ${BUILD}.
+
+Searched:
+${describeStaticDirs()}
+
+Upload index.html to the repo root.</pre>
+<p>Everything else started correctly.</p>`));
+  }
+
+  res.sendFile(index, (err) => {
+    if (!err || res.headersSent) return;
+    res.status(500).type('html').send(page('Landfall',
+      `<h1>Landfall</h1><pre>Could not read ${escapeHtml(index)}. Build ${BUILD}.
+
+${escapeHtml(err.message)}</pre>
+<p>Everything else started correctly.</p>`));
+  });
 });
 
 /**
@@ -298,7 +396,7 @@ app.get('/', (req, res) => {
  * instead of a restart loop that swallows its own output.
  */
 const server = app.listen(PORT, () => {
-  console.log(`[server] Landfall listening on ${PORT}`);
+  console.log(`[server] Landfall build ${BUILD} listening on ${PORT}`);
   start();
 });
 
@@ -317,10 +415,16 @@ async function start() {
   if (credProblem) problems.push(credProblem);
 
   if (problems.length) {
+    problems.push(envInventory());
     startupProblem = problems.join('\n\n');
     console.error('[server] not ready\n' + startupProblem);
     return;
   }
+
+  const index = findIndexHtml();
+  console.log(index
+    ? `[server] console at ${index}`
+    : `[server] warning: no index.html found. Searched:\n${describeStaticDirs()}`);
 
   try {
     await db.init();

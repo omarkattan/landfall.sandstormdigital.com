@@ -10,7 +10,7 @@ const TICK_BUDGET_MS = parseInt(process.env.TICK_BUDGET_MS || '45000', 10);
 
 // Bumped on every delivered change, so a stale file on the server is obvious
 // from the logs and from /api/setup rather than guessed at.
-const BUILD = 'r2-0';
+const BUILD = 'r3-0';
 
 function envValue(name) {
   const v = process.env[name];
@@ -153,6 +153,7 @@ const ingest = require('./ingest');
 const updates = require('./updates');
 const segments = require('./segments');
 const baseline = require('./baseline');
+const impact = require('./impact');
 
 function requireAdmin(req, res, next) {
   if (req.cookies && req.cookies.lf_key === ADMIN_KEY) return next();
@@ -339,6 +340,53 @@ app.post('/api/tick', requireAdmin, wrap(async (req, res) => {
 }));
 
 // ---------------------------------------------------------------- segments
+
+/**
+ * The reading of the data, not the data itself. One update, one property,
+ * assessed against a baseline frozen before the rollout began.
+ */
+app.get('/api/findings', requireAdmin, wrap(async (req, res) => {
+  const propertyId = parseInt(req.query.property_id, 10);
+  const updateId = req.query.update_id;
+  if (!propertyId || !updateId) {
+    return res.status(400).json({ error: 'property_id and update_id are required.' });
+  }
+
+  const u = await db.query('select * from algo_updates where id = $1', [updateId]);
+  if (!u.rows[0]) return res.status(404).json({ error: 'No such update.' });
+
+  const result = await impact.assessUpdate(propertyId, u.rows[0]);
+  if (!result) return res.json({ status: 'no_data', message: 'No stored data for this property yet.' });
+  res.json(result);
+}));
+
+/**
+ * Every update that can be assessed, newest first, so the console can offer a
+ * list without running the full assessment for each one.
+ */
+app.get('/api/findings/updates', requireAdmin, wrap(async (req, res) => {
+  const propertyId = parseInt(req.query.property_id, 10);
+  if (!propertyId) return res.status(400).json({ error: 'property_id is required.' });
+
+  const bounds = await db.query(
+    'select min(date)::text as first, max(date)::text as last from gsc_daily where property_id = $1',
+    [propertyId]
+  );
+  const first = bounds.rows[0] && bounds.rows[0].first;
+  const last = bounds.rows[0] && bounds.rows[0].last;
+  if (!first) return res.json({ rows: [], coverage: null });
+
+  const r = await db.query(
+    `select id, name, update_type, began_at, ended_at, url
+       from algo_updates
+      where began_at is not null
+        and began_at::date >= $1::date
+        and began_at::date <= $2::date
+      order by began_at desc`,
+    [first, last]
+  );
+  res.json({ rows: r.rows, coverage: { first, last } });
+}));
 
 app.get('/api/segments', requireAdmin, wrap(async (req, res) => {
   const propertyId = parseInt(req.query.property_id, 10);

@@ -1,49 +1,70 @@
 'use strict';
 
 const path = require('path');
-
-/**
- * Preflight. Every required variable is checked before anything else loads, so
- * a misconfigured service reports all its problems at once instead of failing
- * on whichever one happens to be touched first.
- */
-function preflight() {
-  const missing = [];
-  if (!process.env.DATABASE_URL) missing.push('DATABASE_URL - Internal Database URL from your Render Postgres');
-  if (!process.env.ADMIN_KEY) missing.push('ADMIN_KEY - a long random string, used to sign in');
-  if (!process.env.CRON_KEY) missing.push('CRON_KEY - a different long random string, used by the cron jobs');
-  if (!process.env.GOOGLE_SA_JSON) missing.push('GOOGLE_SA_JSON - the full contents of the service account key file');
-
-  if (missing.length) {
-    console.error('');
-    console.error('Landfall cannot start. These environment variables are not set:');
-    missing.forEach((m) => console.error(`  - ${m}`));
-    console.error('');
-    console.error('Add them under Environment on the Render web service, then redeploy.');
-    console.error('');
-    process.exit(1);
-  }
-}
-
-preflight();
-
 const express = require('express');
 const cookieParser = require('cookie-parser');
 
-const db = require('./db');
-const { listSites, serviceAccountEmail } = require('./google');
-const ingest = require('./ingest');
-const updates = require('./updates');
+const PORT = process.env.PORT || 3000;
+const ADMIN_KEY = process.env.ADMIN_KEY || '';
+const CRON_KEY = process.env.CRON_KEY || '';
+const TICK_BUDGET_MS = parseInt(process.env.TICK_BUDGET_MS || '45000', 10);
+
+/**
+ * Holds the reason the app is not usable, if any. When this is set the server
+ * still listens and every route explains the problem, rather than exiting.
+ * A crash loop on Render produces no readable output, because stderr is a pipe
+ * and process.exit() discards writes that have not flushed yet.
+ */
+let startupProblem = null;
+
+const REQUIRED = [
+  ['DATABASE_URL', 'the Internal Database URL from your Render Postgres instance'],
+  ['ADMIN_KEY', 'a long random string, used to sign in'],
+  ['CRON_KEY', 'a different long random string, used by the cron jobs'],
+  ['GOOGLE_SA_JSON', 'the full contents of the service account key file, braces included']
+];
+
+function missingEnv() {
+  return REQUIRED.filter(([name]) => !process.env[name]);
+}
 
 const app = express();
 app.set('trust proxy', 1);
 app.use(express.json({ limit: '1mb' }));
 app.use(cookieParser());
 
-const ADMIN_KEY = process.env.ADMIN_KEY;
-const CRON_KEY = process.env.CRON_KEY;
-const TICK_BUDGET_MS = parseInt(process.env.TICK_BUDGET_MS || '45000', 10);
-const PORT = process.env.PORT || 3000;
+function wrap(fn) {
+  return (req, res) => {
+    Promise.resolve(fn(req, res)).catch((err) => {
+      console.error('[api]', err.message);
+      res.status(500).json({ error: err.message });
+    });
+  };
+}
+
+// Health always answers, so Render sees the service as live and the logs stay
+// readable while configuration is being fixed.
+app.get('/healthz', (req, res) => {
+  res.json({ ok: !startupProblem, problem: startupProblem });
+});
+
+app.get('/api/setup', (req, res) => {
+  res.json({ ready: !startupProblem, problem: startupProblem });
+});
+
+// Every other API route waits until startup succeeded.
+app.use('/api', (req, res, next) => {
+  if (req.path === '/setup') return next();
+  if (startupProblem) {
+    return res.status(503).json({ error: startupProblem });
+  }
+  return next();
+});
+
+const db = require('./db');
+const { listSites, serviceAccountEmail } = require('./google');
+const ingest = require('./ingest');
+const updates = require('./updates');
 
 function requireAdmin(req, res, next) {
   if (req.cookies && req.cookies.lf_key === ADMIN_KEY) return next();
@@ -58,17 +79,6 @@ function requireCron(req, res) {
   }
   return true;
 }
-
-function wrap(fn) {
-  return (req, res) => {
-    Promise.resolve(fn(req, res)).catch((err) => {
-      console.error('[api]', err.message);
-      res.status(500).json({ error: err.message });
-    });
-  };
-}
-
-app.get('/healthz', (req, res) => res.json({ ok: true }));
 
 app.post('/api/login', (req, res) => {
   const key = (req.body && req.body.key) || '';
@@ -207,28 +217,17 @@ app.post('/api/updates/manual', requireAdmin, wrap(async (req, res) => {
   res.json({ id });
 }));
 
-/**
- * Lets the admin console run a batch without holding the cron key, since it is
- * already authenticated by session.
- */
 app.post('/api/tick', requireAdmin, wrap(async (req, res) => {
   const budget = Math.min(parseInt(req.query.budget || '25000', 10), 120000);
   res.json(await ingest.runTick(budget));
 }));
 
-/**
- * Cron entry point. Authenticated with CRON_KEY so it can be called by
- * cron-job.org without a browser session.
- */
 app.all('/api/ingest', wrap(async (req, res) => {
   if (!requireCron(req, res)) return;
   const budget = Math.min(parseInt(req.query.budget || TICK_BUDGET_MS, 10), 120000);
   res.json(await ingest.runTick(budget));
 }));
 
-/**
- * Nightly queue top-up. Point a second cron at this once a day.
- */
 app.all('/api/cron/refresh', wrap(async (req, res) => {
   if (!requireCron(req, res)) return;
   const queued = await ingest.queueRefresh();
@@ -241,28 +240,70 @@ app.all('/api/cron/refresh', wrap(async (req, res) => {
   res.json({ queued, updates: synced });
 }));
 
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, 'public'), { index: false }));
+
+function setupPage(problem) {
+  const escaped = String(problem)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Landfall setup</title><style>
+body{margin:0;background:#0e1218;color:#dde3ec;font-family:system-ui,-apple-system,sans-serif;
+display:flex;align-items:center;justify-content:center;min-height:100vh;padding:24px}
+main{max-width:560px}
+h1{font-size:15px;letter-spacing:.16em;text-transform:uppercase;margin:0 0 18px;font-weight:600}
+h1 span{color:#d9a441}
+pre{background:#161c26;border:1px solid #252d3a;border-left:3px solid #e0655c;
+border-radius:3px;padding:14px 16px;white-space:pre-wrap;word-break:break-word;
+font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;line-height:1.55;margin:0 0 18px}
+p{color:#7b8698;font-size:13px;line-height:1.6;margin:0}
+</style></head><body><main>
+<h1>Landfall <span>setup</span></h1>
+<pre>${escaped}</pre>
+<p>Fix this under Environment on the Render web service, then redeploy.
+This page replaces the app until startup succeeds.</p>
+</main></body></html>`;
+}
 
 app.get('/', (req, res) => {
+  if (startupProblem) {
+    return res.status(503).type('html').send(setupPage(startupProblem));
+  }
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-db.init()
-  .then(() => {
-    app.listen(PORT, () => console.log(`[server] Landfall listening on ${PORT}`));
-  })
-  .catch((err) => {
-    console.error('');
-    console.error('Landfall could not start.');
-    console.error(err && err.message ? err.message : String(err));
-    if (err && Array.isArray(err.errors)) {
-      err.errors.forEach((e) => console.error(`  - ${e.code || ''} ${e.message || e}`.trim()));
-    }
-    if (err && err.stack) console.error(err.stack);
-    console.error('');
-    process.exit(1);
-  });
+/**
+ * Listen first, then initialise. Binding the port before touching Postgres
+ * means configuration errors surface as a readable page and readable logs
+ * instead of a restart loop that swallows its own output.
+ */
+const server = app.listen(PORT, () => {
+  console.log(`[server] Landfall listening on ${PORT}`);
+  start();
+});
+
+async function start() {
+  const missing = missingEnv();
+  if (missing.length) {
+    startupProblem =
+      'These environment variables are not set:\n\n' +
+      missing.map(([name, hint]) => `  ${name}\n    ${hint}`).join('\n\n');
+    console.error('[server] not ready\n' + startupProblem);
+    return;
+  }
+
+  try {
+    await db.init();
+    startupProblem = null;
+    console.log('[server] ready');
+  } catch (err) {
+    startupProblem = err && err.message ? err.message : String(err);
+    console.error('[server] not ready: ' + startupProblem);
+  }
+}
 
 process.on('unhandledRejection', (err) => {
   console.error('[server] unhandled rejection:', err && err.message ? err.message : err);
 });
+
+process.on('SIGTERM', () => server.close(() => process.exit(0)));

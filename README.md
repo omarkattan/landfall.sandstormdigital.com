@@ -1,4 +1,4 @@
-# Algo Radar - Round 1
+# Landfall
 
 Maps Google ranking updates to client Search Console performance.
 
@@ -22,10 +22,10 @@ Impact detection comes in Round 3.
 1. Create a project at console.cloud.google.com.
 2. Enable the **Google Search Console API** under APIs and Services.
 3. Go to IAM and Admin, Service Accounts, Create service account. Name it
-   `algo-radar`. No roles needed.
+   `landfall`. No roles needed.
 4. Open the service account, Keys, Add key, Create new key, JSON. Download it.
 5. Copy the `client_email` value. It looks like
-   `algo-radar@yourproject.iam.gserviceaccount.com`.
+   `landfall@yourproject.iam.gserviceaccount.com`.
 
 There is no OAuth consent screen and no verification. The service account is
 just another user as far as Search Console is concerned.
@@ -38,12 +38,12 @@ Settings, Users and permissions, Add user, paste the service account email,
 permission **Full** or **Restricted** (either works, Restricted is enough).
 
 Both domain properties (`sc-domain:example.com`) and URL prefix properties
-(`https://example.com/`) are supported. If a client has both, add the service
-account to both and pick whichever you prefer in the admin console.
+(`https://example.com/`) are supported.
 
 ## 3. Render setup
 
-Create a **Postgres** instance first, then a **Web Service** from this repo.
+Create a **Postgres** instance first, in the same region as the web service,
+then create the **Web Service** from this repo.
 
 - Build command: `npm install`
 - Start command: `npm start`
@@ -52,7 +52,7 @@ Environment variables:
 
 | Variable | Value |
 |---|---|
-| `DATABASE_URL` | Internal connection string from your Render Postgres |
+| `DATABASE_URL` | The **Internal Database URL** from your Render Postgres |
 | `ADMIN_KEY` | A long random string. This is your login |
 | `CRON_KEY` | A different long random string for the cron endpoints |
 | `GOOGLE_SA_JSON` | The entire contents of the downloaded JSON key file |
@@ -60,9 +60,12 @@ Environment variables:
 | `BACKFILL_MONTHS` | Optional, default `16`. Search Console holds no more |
 | `TICK_BUDGET_MS` | Optional, default `45000` |
 
-`GOOGLE_SA_JSON` must be the whole file including the outer braces. Render
-handles the newlines in `private_key` either way - the code repairs escaped
-`\n` sequences automatically.
+`GOOGLE_SA_JSON` must be the whole file including the outer braces. Escaped
+newlines in `private_key` are repaired automatically.
+
+**If something is misconfigured the app still starts.** Open the service URL
+and the page names the exact problem. The same text appears in the Render logs.
+Fix it under Environment, then redeploy.
 
 ## 4. Cron
 
@@ -116,12 +119,24 @@ full 16 month backfill. The table is partitioned by month, created automatically
 Everything upserts on `(property_id, date, slice, dim_value)`, so re-running a
 window is safe and picks up Google's late revisions.
 
+## Troubleshooting
+
+**The page says environment variables are not set.** Add them under Environment
+on the web service and redeploy. The page lists exactly which ones.
+
+**The page says it could not reach Postgres.** Use the Internal Database URL,
+not the external one, and confirm the database and web service are in the same
+region.
+
+**Jobs land in error.** The message is visible in the admin console next to the
+job. **Retry failed** requeues them all.
+
+**Update sync fails.** The Search Status Dashboard feed may have changed shape.
+**Add by hand** still works and nothing else is affected.
+
 ## Notes
 
-- Search Console finalises data about 3 days late. `DATA_LAG_DAYS` controls
-  how far back "today" is treated as being. Requests never go past that.
-- Jobs retry twice, then land in `error` with the message visible in the admin
-  console. **Retry failed** requeues them all.
-- If the Search Status Dashboard feed changes shape, update sync will fail with
-  a clear message and **Add by hand** still works. The rest of the app is
-  unaffected.
+- Search Console finalises data about 3 days late. `DATA_LAG_DAYS` controls how
+  far back "today" is treated as being. Requests never go past that.
+- Jobs retry twice, then land in `error`.
+- Node is pinned to 22.x. Render otherwise picks the newest release available.

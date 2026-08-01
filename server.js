@@ -10,7 +10,7 @@ const TICK_BUDGET_MS = parseInt(process.env.TICK_BUDGET_MS || '45000', 10);
 
 // Bumped on every delivered change, so a stale file on the server is obvious
 // from the logs and from /api/setup rather than guessed at.
-const BUILD = 'r1-7';
+const BUILD = 'r2-0';
 
 function envValue(name) {
   const v = process.env[name];
@@ -151,6 +151,8 @@ const db = require('./db');
 const google = require('./google');
 const ingest = require('./ingest');
 const updates = require('./updates');
+const segments = require('./segments');
+const baseline = require('./baseline');
 
 function requireAdmin(req, res, next) {
   if (req.cookies && req.cookies.lf_key === ADMIN_KEY) return next();
@@ -334,6 +336,168 @@ app.post('/api/updates/manual', requireAdmin, wrap(async (req, res) => {
 app.post('/api/tick', requireAdmin, wrap(async (req, res) => {
   const budget = Math.min(parseInt(req.query.budget || '25000', 10), 120000);
   res.json(await ingest.runTick(budget));
+}));
+
+// ---------------------------------------------------------------- segments
+
+app.get('/api/segments', requireAdmin, wrap(async (req, res) => {
+  const propertyId = parseInt(req.query.property_id, 10);
+  if (!propertyId) return res.status(400).json({ error: 'property_id is required.' });
+  res.json(await segments.listSegments(propertyId));
+}));
+
+app.post('/api/segments', requireAdmin, wrap(async (req, res) => {
+  const body = req.body || {};
+  const propertyId = parseInt(body.property_id, 10);
+  if (!propertyId) return res.status(400).json({ error: 'property_id is required.' });
+  if (!String(body.name || '').trim()) return res.status(400).json({ error: 'A segment needs a name.' });
+
+  res.json(await segments.createSegment({
+    property_id: propertyId,
+    kind: body.kind,
+    name: String(body.name).trim(),
+    rule_type: body.rule_type,
+    pattern: body.pattern,
+    sort_order: 500
+  }));
+}));
+
+app.delete('/api/segments/:id', requireAdmin, wrap(async (req, res) => {
+  const propertyId = parseInt(req.query.property_id, 10);
+  const removed = await segments.deleteSegment(parseInt(req.params.id, 10), propertyId);
+  if (!removed) return res.status(404).json({ error: 'No such segment.' });
+  res.json({ ok: true });
+}));
+
+app.post('/api/segments/auto', requireAdmin, wrap(async (req, res) => {
+  const propertyId = parseInt((req.body && req.body.property_id) || req.query.property_id, 10);
+  if (!propertyId) return res.status(400).json({ error: 'property_id is required.' });
+
+  const p = await db.query('select site_url, brand_terms from properties where id = $1', [propertyId]);
+  if (!p.rows[0]) return res.status(404).json({ error: 'No such property.' });
+
+  const stored = p.rows[0].brand_terms
+    ? p.rows[0].brand_terms.split(',').map((s) => s.trim()).filter(Boolean)
+    : null;
+
+  const result = await segments.autoCreate(propertyId, p.rows[0].site_url, stored);
+
+  if (!stored) {
+    await db.query('update properties set brand_terms = $2 where id = $1',
+      [propertyId, result.brandTerms.join(', ')]);
+  }
+  res.json(result);
+}));
+
+app.post('/api/properties/:id/brand', requireAdmin, wrap(async (req, res) => {
+  const terms = String((req.body && req.body.terms) || '').trim();
+  await db.query('update properties set brand_terms = $2 where id = $1', [req.params.id, terms || null]);
+  res.json({ ok: true });
+}));
+
+/**
+ * Daily series for one segment with its expected range, plus any ranking
+ * updates whose rollout overlaps the window.
+ */
+app.get('/api/series', requireAdmin, wrap(async (req, res) => {
+  const segmentId = parseInt(req.query.segment_id, 10);
+  const metric = ['clicks', 'impressions', 'position'].includes(req.query.metric)
+    ? req.query.metric : 'clicks';
+  const days = Math.min(Math.max(parseInt(req.query.days || '180', 10), 28), 500);
+
+  const s = await db.query('select * from segments where id = $1', [segmentId]);
+  if (!s.rows[0]) return res.status(404).json({ error: 'No such segment.' });
+  const rule = s.rows[0];
+
+  const bounds = await db.query(
+    'select min(date)::text as first, max(date)::text as last from gsc_daily where property_id = $1',
+    [rule.property_id]
+  );
+  if (!bounds.rows[0] || !bounds.rows[0].last) {
+    return res.json({ segment: rule, metric, points: [], updates: [], summary: null });
+  }
+
+  const last = bounds.rows[0].last;
+  const windowStart = baseline.addDays(last, -(days - 1));
+  // Pull extra history so the first visible day still has a full lookback.
+  const fetchStart = baseline.addDays(windowStart, -70);
+  const from = fetchStart < bounds.rows[0].first ? bounds.rows[0].first : fetchStart;
+
+  const raw = await segments.dailySeries(rule, from, last);
+  const dense = segments.densify(raw, from, last);
+
+  const series = dense.map((d) => ({
+    date: d.date,
+    value: metric === 'position' ? d.position : d[metric]
+  })).filter((d) => d.value != null || metric !== 'position');
+
+  const modelled = baseline.buildBaseline(
+    series.map((d) => ({ date: d.date, value: d.value == null ? 0 : d.value })),
+    { lowerIsBetter: metric === 'position' }
+  );
+
+  const visible = modelled.filter((p) => p.date >= windowStart);
+
+  const updates = await db.query(
+    `select id, name, update_type, began_at, ended_at, url
+       from algo_updates
+      where began_at is not null
+        and began_at::date <= $2::date
+        and coalesce(ended_at::date, current_date) >= $1::date
+      order by began_at`,
+    [windowStart, last]
+  );
+
+  res.json({
+    segment: rule,
+    metric,
+    from: windowStart,
+    to: last,
+    points: visible,
+    updates: updates.rows,
+    summary: baseline.summarise(modelled, baseline.addDays(last, -27), last)
+  });
+}));
+
+/**
+ * One row per segment for the chosen window, so the segments that moved
+ * stand out against the ones that did not.
+ */
+app.get('/api/segments/overview', requireAdmin, wrap(async (req, res) => {
+  const propertyId = parseInt(req.query.property_id, 10);
+  const metric = ['clicks', 'impressions'].includes(req.query.metric) ? req.query.metric : 'clicks';
+  const days = Math.min(Math.max(parseInt(req.query.days || '28', 10), 7), 90);
+  if (!propertyId) return res.status(400).json({ error: 'property_id is required.' });
+
+  const bounds = await db.query(
+    'select max(date)::text as last from gsc_daily where property_id = $1',
+    [propertyId]
+  );
+  const last = bounds.rows[0] && bounds.rows[0].last;
+  if (!last) return res.json({ rows: [], window: null });
+
+  const windowStart = baseline.addDays(last, -(days - 1));
+  const fetchStart = baseline.addDays(windowStart, -70);
+
+  const defs = await segments.listSegments(propertyId);
+  const rows = [];
+
+  for (const rule of defs) {
+    const raw = await segments.dailySeries(rule, fetchStart, last);
+    const dense = segments.densify(raw, fetchStart, last);
+    const modelled = baseline.buildBaseline(
+      dense.map((d) => ({ date: d.date, value: d[metric] })),
+      { lowerIsBetter: false }
+    );
+    rows.push({
+      id: rule.id,
+      kind: rule.kind,
+      name: rule.name,
+      ...baseline.summarise(modelled, windowStart, last)
+    });
+  }
+
+  res.json({ rows, window: { from: windowStart, to: last, days, metric } });
 }));
 
 app.all('/api/ingest', wrap(async (req, res) => {

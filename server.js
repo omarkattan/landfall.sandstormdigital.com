@@ -10,7 +10,7 @@ const TICK_BUDGET_MS = parseInt(process.env.TICK_BUDGET_MS || '45000', 10);
 
 // Bumped on every delivered change, so a stale file on the server is obvious
 // from the logs and from /api/setup rather than guessed at.
-const BUILD = 'r3-0';
+const BUILD = 'r3-1';
 
 function envValue(name) {
   const v = process.env[name];
@@ -154,6 +154,7 @@ const updates = require('./updates');
 const segments = require('./segments');
 const baseline = require('./baseline');
 const impact = require('./impact');
+const insights = require('./insights');
 
 function requireAdmin(req, res, next) {
   if (req.cookies && req.cookies.lf_key === ADMIN_KEY) return next();
@@ -340,6 +341,16 @@ app.post('/api/tick', requireAdmin, wrap(async (req, res) => {
 }));
 
 // ---------------------------------------------------------------- segments
+
+/**
+ * Findings that do not depend on an update having happened. This is what the
+ * console shows most of the time, since updates are rare and work is not.
+ */
+app.get('/api/opportunities', requireAdmin, wrap(async (req, res) => {
+  const propertyId = parseInt(req.query.property_id, 10);
+  if (!propertyId) return res.status(400).json({ error: 'property_id is required.' });
+  res.json(await insights.buildOpportunities(propertyId));
+}));
 
 /**
  * The reading of the data, not the data itself. One update, one property,

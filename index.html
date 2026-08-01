@@ -144,6 +144,46 @@
   #chart svg { width: 100%; height: auto; display: block; }
   .chartnote { font-size: 12px; color: var(--muted); margin: 8px 0 0; line-height: 1.6; }
   .chartnote b { color: var(--text); font-family: var(--mono); }
+
+  /* Findings: the reading of the data, given more room than the data itself */
+  .headline {
+    font-size: 19px; line-height: 1.45; margin: 4px 0 10px; font-weight: 500;
+    letter-spacing: -0.01em;
+  }
+  .headline .down { color: var(--err); }
+  .headline .up { color: var(--ok); }
+  .detail { font-size: 14px; line-height: 1.65; color: var(--muted); margin: 0 0 18px; max-width: 68ch; }
+  .detail b { color: var(--text); }
+
+  .callout {
+    background: var(--panel); border: 1px solid var(--line);
+    border-left: 3px solid var(--sand);
+    border-radius: 3px; padding: 13px 16px; margin: 0 0 20px; max-width: 78ch;
+  }
+  .callout h3 {
+    margin: 0 0 6px; font-size: 13px; font-weight: 600; color: var(--sand);
+    letter-spacing: 0;
+  }
+  .callout p { margin: 0; font-size: 13px; line-height: 1.6; color: var(--muted); }
+
+  .recs { display: grid; gap: 10px; margin-top: 6px; }
+  .rec {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 3px; padding: 13px 16px;
+  }
+  .rec.high { border-left: 3px solid var(--err); }
+  .rec.medium { border-left: 3px solid var(--warn); }
+  .rec.low { border-left: 3px solid var(--line); }
+  .rec h4 {
+    margin: 0 0 5px; font-size: 13px; font-weight: 600;
+    display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+  }
+  .rec p { margin: 0; font-size: 13px; line-height: 1.65; color: var(--muted); max-width: 78ch; }
+
+  .tag.hit { color: var(--err); border-color: #4a2622; }
+  .tag.gained { color: var(--ok); border-color: #1f4740; }
+  .tag.high { color: var(--err); border-color: #4a2622; }
+  .tag.medium { color: var(--warn); border-color: #4a3a1c; }
   .span {
     position: absolute; top: 0; bottom: 0;
     background: var(--sand); opacity: 0.85; border-radius: 2px; min-width: 3px;
@@ -202,6 +242,16 @@
   </header>
 
   <div class="pills" id="pills"></div>
+
+  <section id="findingsSection">
+    <h2>
+      What the updates did
+      <span class="btnrow">
+        <select id="findUpdate"></select>
+      </span>
+    </h2>
+    <div id="findings"><p class="empty">Loading.</p></div>
+  </section>
 
   <section>
     <h2>
@@ -461,6 +511,98 @@ async function loadUpdates() {
     }).join('')}</tbody></table>`;
 }
 
+// ------------------------------------------------------------- findings
+
+async function loadUpdateList() {
+  if (!seg.propertyId) return;
+  const d = await api(`/api/findings/updates?property_id=${seg.propertyId}`);
+  const sel = $('findUpdate');
+  const keep = sel.value;
+
+  if (!d.rows.length) {
+    sel.innerHTML = '<option>No updates inside your data range</option>';
+    $('findings').innerHTML = `<p class="empty">No ranking updates fall inside your stored date range
+      (${d.coverage ? `${shortDate(d.coverage.first)} to ${shortDate(d.coverage.last)}` : 'no data yet'}).
+      Choose <b>Sync from Google</b> below to pull the update history.</p>`;
+    return;
+  }
+
+  sel.innerHTML = d.rows.map((u) =>
+    `<option value="${esc(u.id)}">${esc(u.name)}</option>`).join('');
+  if (keep && d.rows.some((u) => u.id === keep)) sel.value = keep;
+
+  await loadFindings(sel.value);
+}
+
+function verdictTag(v) {
+  if (v === 'hit') return '<span class="tag hit">hit</span>';
+  if (v === 'gained') return '<span class="tag gained">gained</span>';
+  return '<span class="tag">steady</span>';
+}
+
+async function loadFindings(updateId) {
+  if (!updateId || !seg.propertyId) return;
+  $('findings').innerHTML = '<p class="empty">Reading the data.</p>';
+
+  const d = await api(`/api/findings?property_id=${seg.propertyId}&update_id=${encodeURIComponent(updateId)}`);
+
+  if (d.status !== 'assessed') {
+    $('findings').innerHTML = `<p class="empty">${esc(d.message || 'This update cannot be assessed yet.')}</p>`;
+    return;
+  }
+
+  // The headline number is coloured so the direction reads before the words do.
+  const headline = esc(d.headline).replace(/(-\d+%)/g, '<span class="down">$1</span>')
+    .replace(/(\+\d+%)/g, '<span class="up">$1</span>');
+
+  let html = `<p class="headline">${headline}</p>`;
+  if (d.detail) html += `<p class="detail">${esc(d.detail)}</p>`;
+
+  if (d.signature) {
+    html += `<div class="callout">
+      <h3>${esc(d.signature.title)}</h3>
+      <p>${esc(d.signature.body)}</p>
+    </div>`;
+  }
+
+  if (d.recommendations.length) {
+    html += `<p class="sub">What to do</p><div class="recs">${d.recommendations.map((r) => `
+      <div class="rec ${esc(r.priority)}">
+        <h4>${esc(r.title)} <span class="tag ${esc(r.priority)}">${esc(r.priority)}</span></h4>
+        <p>${esc(r.body)}</p>
+      </div>`).join('')}</div>`;
+  }
+
+  html += `<p class="sub">Evidence, ${d.window.postStart} to ${d.window.postEnd}</p>
+    <table>
+      <thead><tr>
+        <th>Segment</th><th></th>
+        <th class="num">Clicks</th><th class="num">Expected</th><th class="num">Change</th>
+        <th class="num hide-sm">Impressions</th><th class="num hide-sm">Position</th>
+        <th class="hide-sm">Reading</th>
+      </tr></thead>
+      <tbody>${d.findings.map((f) => `
+        <tr>
+          <td>${esc(f.name)}</td>
+          <td>${verdictTag(f.verdict)}</td>
+          <td class="num">${f.actualClicks.toLocaleString()}</td>
+          <td class="num">${f.expectedClicks.toLocaleString()}</td>
+          <td class="delta ${pctClass(f.clicksPct)}">${fmtPct(f.clicksPct)}</td>
+          <td class="num hide-sm ${pctClass(f.imprPct)}">${fmtPct(f.imprPct)}</td>
+          <td class="num hide-sm">${f.posDelta == null ? '-' : (f.posDelta > 0 ? '+' : '') + f.posDelta.toFixed(1)}</td>
+          <td class="hide-sm" style="color:var(--muted)">${esc(f.diagnosis.label)}</td>
+        </tr>`).join('')}</tbody>
+    </table>
+    <p class="chartnote">Expected is what each segment would have done had the rollout not happened,
+      modelled from the same weekdays in the eight weeks before it began. A worsening position is a
+      positive number, since position 3 is worse than position 1.</p>`;
+
+  $('findings').innerHTML = html;
+}
+
+$('findUpdate').addEventListener('change', (e) =>
+  loadFindings(e.target.value).catch((err) => toast(err.message)));
+
 // ------------------------------------------------------------- segments
 
 const seg = { propertyId: null, selected: null };
@@ -644,7 +786,10 @@ $('buildSegs').addEventListener('click', (e) => busy(e.target, 'Building', async
 
 async function loadAll() {
   await Promise.all([loadStatus(), loadProps(), loadJobs(), loadUpdates()]);
-  await loadSegments().catch(() => {});
+  await Promise.all([
+    loadUpdateList().catch(() => {}),
+    loadSegments().catch(() => {})
+  ]);
 }
 
 $('props').addEventListener('click', (ev) => {

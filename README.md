@@ -15,9 +15,40 @@ it means.
 | `segments.js` | Segment rules, auto-derivation, SQL predicates |
 | `baseline.js` | Same-weekday medians and expected range bands |
 | `impact.js` | Attribution, diagnosis, narrative and recommendations |
+| `insights.js` | Always-on opportunities: CTR curve, striking distance, decay |
 | `index.html` | Admin console |
 
-## How a finding is produced
+## What to work on
+
+Update attribution only says something on the handful of days a year when an
+update actually moved the site. The rest of the time the same data still
+contains work worth doing, and `insights.js` finds it. This runs on every load
+and does not depend on an update having happened.
+
+**Your own click-through curve.** Rather than comparing against published CTR
+tables, the site's real curve is fitted from its own data: a power law through
+the seventieth percentile of each position bucket. The seventieth percentile
+rather than the median, so "expected" means what a well-written listing of
+yours achieves, not the average of good and bad ones. A fitted curve rather
+than the raw buckets, because on a small site one underperforming page can
+define a whole position and then never be flagged as underperforming.
+
+Tested against a synthetic population with a known curve, the fit lands within
+0.2 percentage points at every position from 1 to 20.
+
+Four findings come out of it:
+
+| Finding | Test | Why it matters |
+|---|---|---|
+| One push from the top | position 4 to 20, 50+ impressions | The page already ranks. Upside is measured against what the site earns at position three |
+| Ranks well, not clicked | top ten, under 60% of curve | Either the title is wrong or something above the organic result is taking the click |
+| Decaying | 28 days against the previous 28, down 25%+ | Gradual decay never trips an update-anchored comparison |
+| Growing | same window, up 30%+ | Demand moving toward a query is the clearest case for new content |
+
+Every finding names the specific queries or URLs it applies to, with the clicks
+at stake, because advice without a target is something nobody gets round to.
+
+## How an update finding is produced
 
 **1. Freeze the expectation.** The rolling baseline adapts within about eight
 weeks, so by the time you look, a step change has become the new normal. For

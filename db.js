@@ -163,6 +163,28 @@ create table if not exists segments (
 create index if not exists segments_property_idx on segments (property_id, kind, sort_order);
 
 alter table properties add column if not exists brand_terms text;
+
+create table if not exists users (
+  id serial primary key,
+  email text unique not null,
+  name text,
+  password_hash text,
+  google_sub text unique,
+  role text not null default 'member',
+  status text not null default 'pending',
+  created_at timestamptz not null default now(),
+  last_login_at timestamptz
+);
+
+create table if not exists waitlist (
+  id serial primary key,
+  email text unique not null,
+  name text,
+  company text,
+  website text,
+  note text,
+  created_at timestamptz not null default now()
+);
 `;
 
 /**

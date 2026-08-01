@@ -105,6 +105,23 @@
     position: relative; height: 8px; background: var(--panel-2);
     border-radius: 2px; overflow: hidden; min-width: 120px;
   }
+  .track.big { height: 12px; margin-bottom: 9px; }
+  .fill {
+    height: 100%; background: var(--sand); border-radius: 2px;
+    transition: width .4s ease;
+  }
+  .queue { margin-bottom: 14px; }
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 16px;
+    font-size: 12px; color: var(--muted); font-family: var(--mono);
+  }
+  .legend b { color: var(--text); }
+  .legend .ok { color: var(--ok); }
+  .legend .err { color: var(--err); }
+  .sub {
+    font-size: 10px; text-transform: uppercase; letter-spacing: .12em;
+    color: var(--muted); margin: 20px 0 6px;
+  }
   .span {
     position: absolute; top: 0; bottom: 0;
     background: var(--sand); opacity: 0.85; border-radius: 2px; min-width: 3px;
@@ -298,21 +315,64 @@ async function loadProps() {
 }
 
 async function loadJobs() {
-  const rows = await api('/api/jobs');
-  if (!rows.length) {
-    $('jobs').innerHTML = '<p class="empty">Nothing running and nothing failed.</p>';
+  const d = await api('/api/jobs');
+  const c = d.counts;
+  const settled = c.done + c.error;
+  const pct = d.total ? Math.round((settled / d.total) * 100) : 0;
+
+  if (!d.total) {
+    $('jobs').innerHTML = '<p class="empty">No work queued yet. Choose Backfill on a property to queue its history.</p>';
     return;
   }
-  $('jobs').innerHTML = `<table>
-    <thead><tr><th>Property</th><th>Slice</th><th class="hide-sm">Window</th><th>State</th><th>Detail</th></tr></thead>
-    <tbody>${rows.map((j) => `
-      <tr>
-        <td class="mono">${esc(j.site_url)}</td>
-        <td class="mono">${esc(j.slice)}</td>
-        <td class="mono hide-sm">${shortDate(j.start_date)} to ${shortDate(j.end_date)}</td>
-        <td><span class="tag ${j.status === 'error' ? 'spam' : 'on'}">${esc(j.status)}</span></td>
-        <td class="err">${esc(j.error || '')}</td>
-      </tr>`).join('')}</tbody></table>`;
+
+  let html = `<div class="queue">
+    <div class="track big"><div class="fill" style="width:${pct}%"></div></div>
+    <div class="legend">
+      <span><b>${settled.toLocaleString()}</b> of ${d.total.toLocaleString()} jobs complete</span>
+      <span>${c.queued.toLocaleString()} waiting</span>
+      ${c.running ? `<span class="ok">${c.running} running now</span>` : ''}
+      ${c.error ? `<span class="err">${c.error} failed</span>` : ''}
+    </div>
+  </div>`;
+
+  if (!c.running && c.queued) {
+    html += `<p class="empty">Nothing is running. The queue only advances when you
+      choose <b>Run a batch now</b>, or when the ingest cron calls the app.</p>`;
+  }
+
+  if (d.active.length) {
+    html += `<table>
+      <thead><tr><th>Property</th><th>Slice</th><th class="hide-sm">Window</th><th>State</th><th>Detail</th></tr></thead>
+      <tbody>${d.active.map((j) => `
+        <tr>
+          <td class="mono">${esc(j.site_url)}</td>
+          <td class="mono">${esc(j.slice)}</td>
+          <td class="mono hide-sm">${shortDate(j.start_date)} to ${shortDate(j.end_date)}</td>
+          <td><span class="tag ${j.status === 'error' ? 'spam' : 'on'}">${esc(j.status)}</span></td>
+          <td class="err">${esc(j.error || '')}</td>
+        </tr>`).join('')}</tbody></table>`;
+  }
+
+  if (d.recent.length) {
+    html += `<p class="sub">Most recently finished</p><table>
+      <tbody>${d.recent.map((j) => `
+        <tr>
+          <td class="mono">${esc(j.site_url)}</td>
+          <td class="mono">${esc(j.slice)}</td>
+          <td class="mono hide-sm">${shortDate(j.start_date)} to ${shortDate(j.end_date)}</td>
+          <td class="num">${Number(j.rows_written || 0).toLocaleString()} rows</td>
+        </tr>`).join('')}</tbody></table>`;
+  } else if (d.next.length) {
+    html += `<p class="sub">Next up</p><table>
+      <tbody>${d.next.map((j) => `
+        <tr>
+          <td class="mono">${esc(j.site_url)}</td>
+          <td class="mono">${esc(j.slice)}</td>
+          <td class="mono hide-sm">${shortDate(j.start_date)} to ${shortDate(j.end_date)}</td>
+        </tr>`).join('')}</tbody></table>`;
+  }
+
+  $('jobs').innerHTML = html;
 }
 
 async function loadUpdates() {

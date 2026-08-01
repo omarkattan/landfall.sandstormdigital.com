@@ -10,7 +10,7 @@ const TICK_BUDGET_MS = parseInt(process.env.TICK_BUDGET_MS || '45000', 10);
 
 // Bumped on every delivered change, so a stale file on the server is obvious
 // from the logs and from /api/setup rather than guessed at.
-const BUILD = 'r3-1';
+const BUILD = 'r4-0';
 
 function envValue(name) {
   const v = process.env[name];
@@ -155,10 +155,36 @@ const segments = require('./segments');
 const baseline = require('./baseline');
 const impact = require('./impact');
 const insights = require('./insights');
+const auth = require('./auth');
+
+/**
+ * Two ways in. The admin key is the bootstrap credential and always works.
+ * Accounts are for everyone else, and are inert until approved, so a public
+ * sign-up page cannot hand anybody your clients' data.
+ */
+async function currentUser(req) {
+  if (req.cookies && req.cookies.lf_key === ADMIN_KEY) {
+    return { id: 0, email: 'admin', role: 'admin', status: 'active', viaKey: true };
+  }
+  const session = auth.readSession(req.cookies && req.cookies.lf_sess);
+  if (!session) return null;
+
+  const user = await auth.findUserById(session.userId);
+  if (!user || user.status !== 'active') return null;
+  return user;
+}
 
 function requireAdmin(req, res, next) {
-  if (req.cookies && req.cookies.lf_key === ADMIN_KEY) return next();
-  return res.status(401).json({ error: 'Sign in to continue.' });
+  currentUser(req).then((user) => {
+    if (!user) return res.status(401).json({ error: 'Sign in to continue.' });
+    req.user = user;
+    next();
+  }).catch((err) => res.status(500).json({ error: err.message }));
+}
+
+function requireOwner(req, res, next) {
+  if (req.user && (req.user.viaKey || req.user.role === 'admin')) return next();
+  return res.status(403).json({ error: 'Only an account owner can do that.' });
 }
 
 function requireCron(req, res) {
@@ -170,27 +196,129 @@ function requireCron(req, res) {
   return true;
 }
 
+const COOKIE = {
+  httpOnly: true,
+  sameSite: 'lax',
+  secure: process.env.NODE_ENV === 'production',
+  maxAge: 30 * 24 * 60 * 60 * 1000
+};
+
+app.get('/api/auth/config', (req, res) => {
+  res.json({ googleClientId: process.env.GOOGLE_OAUTH_CLIENT_ID || null });
+});
+
 app.post('/api/login', (req, res) => {
   const key = (req.body && req.body.key) || '';
   if (key !== ADMIN_KEY) return res.status(401).json({ error: 'That key does not match.' });
-
-  res.cookie('lf_key', key, {
-    httpOnly: true,
-    sameSite: 'lax',
-    secure: process.env.NODE_ENV === 'production',
-    maxAge: 30 * 24 * 60 * 60 * 1000
-  });
+  res.cookie('lf_key', key, COOKIE);
   res.json({ ok: true });
 });
+
+app.post('/api/auth/register', wrap(async (req, res) => {
+  const { email, password, name } = req.body || {};
+  const clean = auth.normaliseEmail(email);
+
+  if (!auth.validEmail(clean)) return res.status(400).json({ error: 'That does not look like an email address.' });
+  const problem = auth.passwordProblem(password);
+  if (problem) return res.status(400).json({ error: problem });
+
+  const existing = await auth.findUserByEmail(clean);
+  if (existing) return res.status(409).json({ error: 'There is already an account with that email. Try signing in.' });
+
+  const user = await auth.createUser({ email: clean, name, password });
+  if (user.status === 'active') {
+    res.cookie('lf_sess', auth.issueSession(user.id), COOKIE);
+    await auth.touchLogin(user.id);
+  }
+  res.json({ status: user.status });
+}));
+
+app.post('/api/auth/login', wrap(async (req, res) => {
+  const { email, password } = req.body || {};
+  const user = await auth.findUserByEmail(email);
+
+  // The same message either way, so this cannot be used to discover which
+  // email addresses have accounts.
+  const rejection = { error: 'That email and password do not match.' };
+  if (!user || !user.password_hash) return res.status(401).json(rejection);
+  if (!auth.verifyPassword(String(password || ''), user.password_hash)) {
+    return res.status(401).json(rejection);
+  }
+  if (user.status !== 'active') {
+    return res.status(403).json({ error: 'That account is waiting to be approved.' });
+  }
+
+  res.cookie('lf_sess', auth.issueSession(user.id), COOKIE);
+  await auth.touchLogin(user.id);
+  res.json({ status: 'active' });
+}));
+
+app.post('/api/auth/google', wrap(async (req, res) => {
+  const profile = await auth.verifyGoogleToken((req.body || {}).credential);
+  let user = await auth.findUserByEmail(profile.email);
+
+  if (!user) {
+    user = await auth.createUser({ email: profile.email, name: profile.name, googleSub: profile.sub });
+  } else if (!user.google_sub) {
+    await db.query('update users set google_sub = $2 where id = $1', [user.id, profile.sub]);
+  }
+
+  if (user.status !== 'active') return res.json({ status: user.status });
+
+  res.cookie('lf_sess', auth.issueSession(user.id), COOKIE);
+  await auth.touchLogin(user.id);
+  res.json({ status: 'active' });
+}));
 
 app.post('/api/logout', (req, res) => {
   res.clearCookie('lf_key');
+  res.clearCookie('lf_sess');
   res.json({ ok: true });
 });
 
-app.get('/api/session', (req, res) => {
-  res.json({ signedIn: Boolean(req.cookies && req.cookies.lf_key === ADMIN_KEY) });
-});
+app.get('/api/session', wrap(async (req, res) => {
+  const user = await currentUser(req);
+  res.json({
+    signedIn: Boolean(user),
+    email: user ? user.email : null,
+    name: user ? user.name : null,
+    owner: Boolean(user && (user.viaKey || user.role === 'admin'))
+  });
+}));
+
+app.post('/api/waitlist', wrap(async (req, res) => {
+  const body = req.body || {};
+  if (!auth.validEmail(auth.normaliseEmail(body.email))) {
+    return res.status(400).json({ error: 'That does not look like an email address.' });
+  }
+  const r = await auth.addToWaitlist(body);
+  res.json({ ok: true, created: r.created });
+}));
+
+// ------------------------------------------------------------- people
+
+app.get('/api/people', requireAdmin, requireOwner, wrap(async (req, res) => {
+  const [users, list] = await Promise.all([
+    db.query(`select id, email, name, role, status, created_at, last_login_at
+                from users order by status, created_at desc`),
+    db.query(`select id, email, name, company, website, note, created_at
+                from waitlist order by created_at desc limit 100`)
+  ]);
+  res.json({ users: users.rows, waitlist: list.rows });
+}));
+
+app.post('/api/people/:id/status', requireAdmin, requireOwner, wrap(async (req, res) => {
+  const status = (req.body && req.body.status) || '';
+  if (!['active', 'pending', 'blocked'].includes(status)) {
+    return res.status(400).json({ error: 'Status must be active, pending, or blocked.' });
+  }
+  const r = await db.query(
+    'update users set status = $2 where id = $1 returning id, email, status',
+    [req.params.id, status]
+  );
+  if (!r.rows[0]) return res.status(404).json({ error: 'No such person.' });
+  res.json(r.rows[0]);
+}));
 
 app.get('/api/status', requireAdmin, wrap(async (req, res) => {
   const [props, jobs, rows, upd, lastSync, lastErr] = await Promise.all([
@@ -611,12 +739,34 @@ function escapeHtml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-app.get('/', (req, res) => {
+function findFile(name) {
+  for (const dir of STATIC_DIRS) {
+    const candidate = path.join(dir, name);
+    try {
+      if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) return candidate;
+    } catch (e) {
+      // unreadable, keep looking
+    }
+  }
+  return null;
+}
+
+/**
+ * Signed-in visitors get the app. Everyone else gets the landing page, so a
+ * single URL serves both without a redirect that would flash the wrong page.
+ */
+app.get('/', wrap(async (req, res) => {
   if (startupProblem) {
     return res.status(503).type('html').send(page('Landfall setup',
       `<h1>Landfall <span>setup</span></h1><pre>${escapeHtml(startupProblem)}</pre>
 <p>Fix this under Environment on the Render web service, then redeploy.
 This page replaces the app until startup succeeds.</p>`));
+  }
+
+  const user = await currentUser(req);
+  if (!user) {
+    const landing = findFile('landing.html');
+    if (landing) return res.sendFile(landing);
   }
 
   const index = findIndexHtml();
@@ -639,7 +789,7 @@ Upload index.html to the repo root.</pre>
 ${escapeHtml(err.message)}</pre>
 <p>Everything else started correctly.</p>`));
   });
-});
+}));
 
 /**
  * Listen first, then initialise. Binding the port before touching Postgres

@@ -10,7 +10,7 @@ const TICK_BUDGET_MS = parseInt(process.env.TICK_BUDGET_MS || '45000', 10);
 
 // Bumped on every delivered change, so a stale file on the server is obvious
 // from the logs and from /api/setup rather than guessed at.
-const BUILD = 'r1-6';
+const BUILD = 'r1-7';
 
 function envValue(name) {
   const v = process.env[name];
@@ -279,15 +279,43 @@ app.post('/api/jobs/retry', requireAdmin, wrap(async (req, res) => {
 }));
 
 app.get('/api/jobs', requireAdmin, wrap(async (req, res) => {
-  const r = await db.query(
-    `select j.id, j.slice, j.start_date, j.end_date, j.status, j.attempts,
-            j.rows_written, j.error, p.site_url
-       from ingest_jobs j join properties p on p.id = j.property_id
-      where j.status in ('running','error')
-      order by j.status, j.id desc
-      limit 50`
-  );
-  res.json(r.rows);
+  const [counts, active, next, recent] = await Promise.all([
+    db.query(`select status, count(*)::int as n from ingest_jobs group by status`),
+    db.query(
+      `select j.id, j.slice, j.start_date, j.end_date, j.status, j.attempts,
+              j.rows_written, j.error, p.site_url
+         from ingest_jobs j join properties p on p.id = j.property_id
+        where j.status in ('running','error')
+        order by j.status, j.id desc
+        limit 50`
+    ),
+    db.query(
+      `select j.slice, j.start_date, j.end_date, p.site_url
+         from ingest_jobs j join properties p on p.id = j.property_id
+        where j.status = 'queued'
+        order by j.priority asc, j.id asc
+        limit 5`
+    ),
+    db.query(
+      `select j.slice, j.start_date, j.end_date, j.rows_written, j.finished_at, p.site_url
+         from ingest_jobs j join properties p on p.id = j.property_id
+        where j.status = 'done'
+        order by j.finished_at desc nulls last
+        limit 5`
+    )
+  ]);
+
+  const byStatus = { queued: 0, running: 0, done: 0, error: 0 };
+  counts.rows.forEach((r) => { byStatus[r.status] = r.n; });
+  const total = byStatus.queued + byStatus.running + byStatus.done + byStatus.error;
+
+  res.json({
+    counts: byStatus,
+    total,
+    active: active.rows,
+    next: next.rows,
+    recent: recent.rows
+  });
 }));
 
 app.get('/api/updates', requireAdmin, wrap(async (req, res) => {
